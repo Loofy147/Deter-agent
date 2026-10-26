@@ -4,6 +4,7 @@ import time
 import unittest
 
 from deter_agent.gateway import PermissionGateway, ToolCatalog, ToolDefinition
+from deter_agent.evaluation_contract import HARD_COMPONENTS, REQUIRED_TEST_TYPES, TEST_COMPONENT
 from deter_agent.registry import Registry, RegistryConflict, RegistryError
 from deter_agent.runtime import RuntimeEngine
 from tests.helpers import make_gateway, make_policy, make_spec, make_tool_catalog, register_version_everywhere
@@ -69,15 +70,24 @@ class RegistryTests(unittest.TestCase):
     def test_all_evidence_tables_enforce_append_only_updates_and_deletes(self):
         suite = self.registry.record_evaluation_suite(
             "suite-append-only", "agent-a", "v1.0.0",
-            {"tests": [{"test_id": "T-1", "test_type": "regression"}]},
+            {"tests": [
+                {"test_id":f"T-{kind.upper()}","test_type":kind,"repeat_count":3 if kind=="determinism" else 1}
+                for kind in REQUIRED_TEST_TYPES
+            ], "required_test_types":list(REQUIRED_TEST_TYPES)},
             created_by="independent-qa",
         )
         self.registry.record_evaluation(
             run_id="eval-append-only", agent_id="agent-a", version="v1.0.0",
             spec_hash=self.version["spec_hash"], suite_id=suite["suite_id"],
             policy_version="v1", engine_version="test-engine", status="passed",
-            floors_met=True, coverage_complete=True, component_scores={"regression": 1.0},
-            score=1.0, results=[{"test_id": "T-1", "passed": True}], created_by="independent-qa",
+            floors_met=True, coverage_complete=True,
+            component_scores={**{name:1.0 for name in HARD_COMPONENTS},"performance_score":1.0},
+            score=1.0,
+            results=[
+                {"test_id":f"T-{kind.upper()}","test_type":kind,"component":TEST_COMPONENT.get(kind,kind),
+                 "passed":True,"required":True}
+                for kind in REQUIRED_TEST_TYPES
+            ], created_by="independent-qa",
             started_at=100.0, completed_at=101.0,
         )
         self.registry.record_approval(
@@ -128,6 +138,59 @@ class RegistryTests(unittest.TestCase):
             with self.subTest(table=table, operation="DELETE"):
                 with self.assertRaises(sqlite3.IntegrityError):
                     self.registry._connection.execute(f"DELETE FROM {table} WHERE {predicate}")
+
+    def test_registry_rejects_passed_evaluation_with_missing_or_failing_floors(self):
+        incomplete = self.registry.record_evaluation_suite(
+            "suite-incomplete-pass", "agent-a", "v1.0.0",
+            {"tests":[{"test_id":"ONLY-REG","test_type":"regression"}]},
+            created_by="independent-qa",
+        )
+        with self.assertRaises(RegistryError):
+            self.registry.record_evaluation(
+                run_id="forged-missing-floors", agent_id="agent-a", version="v1.0.0",
+                spec_hash=self.version["spec_hash"], suite_id=incomplete["suite_id"],
+                policy_version="v1", engine_version="test-engine", status="passed",
+                floors_met=True, coverage_complete=True, component_scores={"regression_score":1.0},
+                score=1.0, results=[], created_by="independent-qa",
+            )
+
+        full_tests = [
+            {"test_id":f"T-{kind.upper()}","test_type":kind,"repeat_count":3 if kind=="determinism" else 1}
+            for kind in REQUIRED_TEST_TYPES
+        ]
+        full_suite = self.registry.record_evaluation_suite(
+            "suite-failing-floor", "agent-a", "v1.0.0",
+            {"tests":full_tests,"required_test_types":list(REQUIRED_TEST_TYPES),
+             "thresholds":{"minimum_performance_score":0.95}},
+            created_by="independent-qa",
+        )
+        passing_results = [
+            {"test_id":f"T-{kind.upper()}","test_type":kind,"component":TEST_COMPONENT.get(kind,kind),
+             "passed":True,"required":True}
+            for kind in REQUIRED_TEST_TYPES
+        ]
+        scores = {name:1.0 for name in HARD_COMPONENTS}
+        scores["performance_score"] = 1.0
+        scores["policy_score"] = 0.5
+        failing_results = [dict(result, passed=(result["test_type"] != "policy")) for result in passing_results]
+        with self.assertRaises(RegistryError):
+            self.registry.record_evaluation(
+                run_id="forged-failing-floor", agent_id="agent-a", version="v1.0.0",
+                spec_hash=self.version["spec_hash"], suite_id=full_suite["suite_id"],
+                policy_version="v1", engine_version="test-engine", status="passed",
+                floors_met=True, coverage_complete=True, component_scores=scores,
+                score=1.0, results=failing_results, created_by="independent-qa",
+            )
+
+        scores["policy_score"] = 1.0
+        with self.assertRaises(RegistryError):
+            self.registry.record_evaluation(
+                run_id="forged-inconsistent-evidence", agent_id="agent-a", version="v1.0.0",
+                spec_hash=self.version["spec_hash"], suite_id=full_suite["suite_id"],
+                policy_version="v1", engine_version="test-engine", status="passed",
+                floors_met=True, coverage_complete=True, component_scores=scores,
+                score=1.0, results=failing_results, created_by="independent-qa",
+            )
 
     def test_promotion_transaction_rolls_back_on_duplicate_record(self):
         binding = {

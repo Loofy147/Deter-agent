@@ -5,6 +5,7 @@ import unittest
 from deter_agent.evaluation import EvaluationHarness
 from deter_agent.promotion import PromotionDenied, PromotionGate, policy_diff
 from deter_agent.canonical import sha256_json
+from deter_agent.evaluation_contract import HARD_COMPONENTS, REQUIRED_TEST_TYPES, TEST_COMPONENT
 from deter_agent.registry import Registry, RegistryConflict
 from tests.helpers import make_policy, make_spec
 
@@ -20,15 +21,26 @@ def register_version(registry, version, rollback=None, created_by="builder"):
         registry.bind_policy("agent-a", version, env, "policy-a", "v1")
     suite = registry.record_evaluation_suite(
         f"suite-{version}", "agent-a", version,
-        {"tests":[{"test_id":"T-REG","test_type":"regression"}], "thresholds":{}},
+        {
+            "tests":[
+                {"test_id":f"T-{kind.upper()}","test_type":kind,"repeat_count":3 if kind=="determinism" else 1}
+                for kind in REQUIRED_TEST_TYPES
+            ],
+            "required_test_types":list(REQUIRED_TEST_TYPES),
+            "thresholds":{"minimum_performance_score":0.0},
+        },
         created_by="independent-qa",
     )
     report = registry.record_evaluation(
         run_id=f"eval-{version}", agent_id="agent-a", version=version, spec_hash=version_row["spec_hash"],
         suite_id=suite["suite_id"], policy_version="v1", engine_version="test-engine",
         status="passed", floors_met=True, coverage_complete=True,
-        component_scores={"regression_score":1.0}, score=0.99,
-        results=[{"test_id":"T-REG","passed":True}], created_by="independent-qa",
+        component_scores={**{name:1.0 for name in HARD_COMPONENTS},"performance_score":1.0}, score=0.99,
+        results=[
+            {"test_id":f"T-{kind.upper()}","test_type":kind,"component":TEST_COMPONENT.get(kind,kind),
+             "passed":True,"required":True}
+            for kind in REQUIRED_TEST_TYPES
+        ], created_by="independent-qa",
         started_at=100.0, completed_at=101.0,
     )
     return version_row, report
@@ -90,13 +102,13 @@ class EvaluationTests(unittest.TestCase):
 
     def test_evaluation_harness_requires_all_component_classes(self):
         suite = {
-            "required_test_types": ["determinism","regression","policy","schema","state_transition","tie_break","failure_path"],
+            "required_test_types": list(REQUIRED_TEST_TYPES),
             "performance_score": 1.0,
             "thresholds": {"minimum_performance_score": 0.95},
             "tests": [
                 {"test_id": kind, "test_type":kind, "repeat_count":3 if kind=="determinism" else 1,
                  "expected_output":{"status":"ok"}}
-                for kind in ["determinism","regression","policy","schema","state_transition","tie_break","failure_path"]
+                for kind in REQUIRED_TEST_TYPES
             ],
         }
         self.registry.record_evaluation_suite("suite-harness", "agent-a", "v1.0.0", suite, created_by="qa-user")
