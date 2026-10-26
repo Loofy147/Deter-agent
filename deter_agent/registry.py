@@ -13,7 +13,7 @@ from typing import Any, Iterator
 
 from .canonical import canonical_json, sha256_json
 from .schema import normalize_and_validate
-from .evaluation_contract import HARD_COMPONENTS, REQUIRED_TEST_TYPES, SUPPLEMENTAL_TEST_TYPES, TEST_COMPONENT
+from .evaluation_contract import HARD_COMPONENTS, REQUIRED_TEST_TYPES, SUPPLEMENTAL_TEST_TYPES, TEST_COMPONENT, performance_score_from_latencies
 
 ENVIRONMENTS = {"sandbox", "staging", "production"}
 FRAMEWORKS = {
@@ -498,9 +498,16 @@ class Registry:
         required_types = normalized.get("required_test_types", list(REQUIRED_TEST_TYPES))
         if not isinstance(required_types, list) or any(value not in supported_types for value in required_types):
             raise RegistryError("required_test_types must contain supported test type names")
-        threshold = normalized.get("thresholds", {}).get("minimum_performance_score", 0.0)
+        thresholds = normalized.get("thresholds", {})
+        threshold = thresholds.get("minimum_performance_score", 0.0)
         if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(threshold) or not 0 <= threshold <= 1:
             raise RegistryError("minimum_performance_score must be finite and between 0 and 1")
+        maximum_latency = thresholds.get("maximum_latency_ms")
+        if maximum_latency is not None and (
+            isinstance(maximum_latency, bool) or not isinstance(maximum_latency, (int, float))
+            or not math.isfinite(maximum_latency) or maximum_latency <= 0
+        ):
+            raise RegistryError("maximum_latency_ms must be finite and positive")
         suite_hash = sha256_json(normalized)
         with self._transaction() as conn:
             existing = conn.execute("SELECT * FROM evaluation_suites WHERE suite_id=?", (suite_id,)).fetchone()
@@ -594,6 +601,13 @@ class Registry:
                 observed_score = sum(values) / len(values)
                 if not math.isclose(float(component_scores[component]), observed_score, rel_tol=0.0, abs_tol=1e-9):
                     raise RegistryError(f"component score {component!r} does not match its immutable result evidence")
+            latencies = [result.get("elapsed_ms") for result in results]
+            maximum_latency_ms = suite["suite"].get("thresholds", {}).get("maximum_latency_ms")
+            computed_performance = performance_score_from_latencies(latencies, maximum_latency_ms)
+            if computed_performance is None:
+                raise RegistryError("passing evaluation requires a valid per-suite maximum_latency_ms and measured latencies")
+            if not math.isclose(float(component_scores["performance_score"]), computed_performance, rel_tol=0.0, abs_tol=1e-9):
+                raise RegistryError("performance_score does not match measured maximum latency")
         start = started_at if started_at is not None else time.time()
         finish = completed_at if completed_at is not None else time.time()
         if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in (start, finish)):
@@ -634,13 +648,21 @@ class Registry:
         result["component_scores"] = self._json(result.pop("component_scores_json"))
         result["results"] = self._json(result.pop("results_json"))
         suite = self.get_evaluation_suite(result["suite_id"])
-        performance_floor = suite["suite"].get("thresholds", {}).get("minimum_performance_score", 0.0)
+        thresholds = suite["suite"].get("thresholds", {})
+        performance_floor = thresholds.get("minimum_performance_score", 0.0)
         scores = result["component_scores"]
         hard_scores_valid = all(scores.get(name) == 1.0 for name in HARD_COMPONENTS)
         performance = scores.get("performance_score")
+        computed_performance = performance_score_from_latencies(
+            [item.get("elapsed_ms") for item in result["results"] if isinstance(item, dict)],
+            thresholds.get("maximum_latency_ms"),
+        )
         performance_valid = (
-            isinstance(performance, (int, float)) and not isinstance(performance, bool)
-            and math.isfinite(performance) and performance >= performance_floor
+            computed_performance is not None
+            and isinstance(performance, (int, float)) and not isinstance(performance, bool)
+            and math.isfinite(performance)
+            and math.isclose(performance, computed_performance, rel_tol=0.0, abs_tol=1e-9)
+            and performance >= performance_floor
         )
         result["passed"] = (
             result["status"] == "passed" and result["floors_met"] and result["coverage_complete"]

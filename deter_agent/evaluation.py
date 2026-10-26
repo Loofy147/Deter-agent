@@ -11,7 +11,7 @@ from .canonical import canonical_json, normalize_json, sha256_json
 from .registry import Registry, RegistryError
 from .rules import Rule, RuleSet
 
-from .evaluation_contract import HARD_COMPONENTS, REQUIRED_TEST_TYPES, SUPPLEMENTAL_TEST_TYPES, TEST_COMPONENT
+from .evaluation_contract import HARD_COMPONENTS, REQUIRED_TEST_TYPES, SUPPLEMENTAL_TEST_TYPES, TEST_COMPONENT, performance_score_from_latencies
 
 
 def _without_fields(value: Any, ignored: set[str]) -> Any:
@@ -87,9 +87,16 @@ class EvaluationHarness:
             component_scores[component] = (sum(results) / len(results)) if results else 0.0
         thresholds = suite.get("thresholds", {})
         performance_floor = float(thresholds.get("minimum_performance_score", 0.0))
-        performance_observed = float(suite.get("performance_score", 1.0))
+        maximum_latency_ms = thresholds.get("maximum_latency_ms")
+        measured_latencies = [result["elapsed_ms"] for result in test_results]
+        computed_performance = performance_score_from_latencies(measured_latencies, maximum_latency_ms)
+        performance_observed = computed_performance if computed_performance is not None else 0.0
         component_scores["performance_score"] = performance_observed
-        floors_met = all(component_scores[name] == 1.0 for name in HARD_COMPONENTS) and performance_observed >= performance_floor
+        floors_met = (
+            all(component_scores[name] == 1.0 for name in HARD_COMPONENTS)
+            and computed_performance is not None
+            and performance_observed >= performance_floor
+        )
 
         # Safety-critical coverage classes are normative and cannot be disabled by a suite override.
         required_coverage = set(suite.get("required_test_types", list(REQUIRED_TEST_TYPES))) | set(REQUIRED_TEST_TYPES)
