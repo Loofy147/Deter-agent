@@ -225,11 +225,23 @@ CREATE TABLE IF NOT EXISTS frozen_decisions (
   decision_json TEXT NOT NULL,
   created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS bootstrap_receipts (
+  seed_id TEXT PRIMARY KEY,
+  key_id TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  version TEXT NOT NULL,
+  build_step INTEGER NOT NULL,
+  expires_after_step INTEGER NOT NULL,
+  created_at REAL NOT NULL,
+  FOREIGN KEY(agent_id) REFERENCES agents(agent_id),
+  FOREIGN KEY(agent_id, version) REFERENCES versions(agent_id, version)
+);
 """
 
 _APPEND_ONLY = (
     "versions", "policies", "evaluation_suites", "evaluation_runs",
-    "approval_events", "promotion_records", "traces", "frozen_decisions",
+    "approval_events", "promotion_records", "traces", "frozen_decisions", "bootstrap_receipts",
 )
 
 
@@ -238,6 +250,8 @@ class Registry:
 
     def __init__(self, database: str | Path = ":memory:") -> None:
         self._lock = threading.RLock()
+        self._transaction_depth = 0
+        self._savepoint_counter = 0
         self._connection = sqlite3.connect(str(database), timeout=10, isolation_level=None, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.executescript(_SCHEMA_DDL)
@@ -255,14 +269,33 @@ class Registry:
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
+        """Serialize writers and support atomic service operations through nested savepoints."""
         with self._lock:
-            self._connection.execute("BEGIN IMMEDIATE")
+            outermost = self._transaction_depth == 0
+            savepoint = None
+            if outermost:
+                self._connection.execute("BEGIN IMMEDIATE")
+            else:
+                self._savepoint_counter += 1
+                savepoint = f"registry_nested_{self._savepoint_counter}"
+                self._connection.execute(f"SAVEPOINT {savepoint}")
+            prior_depth = self._transaction_depth
+            self._transaction_depth = prior_depth + 1
             try:
                 yield self._connection
-                self._connection.execute("COMMIT")
+                if savepoint is not None:
+                    self._connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+                else:
+                    self._connection.execute("COMMIT")
             except Exception:
-                self._connection.execute("ROLLBACK")
+                if savepoint is not None:
+                    self._connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                    self._connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+                else:
+                    self._connection.execute("ROLLBACK")
                 raise
+            finally:
+                self._transaction_depth = prior_depth
 
     @staticmethod
     def _json(text: str | None) -> Any:
