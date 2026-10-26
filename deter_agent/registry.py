@@ -13,6 +13,7 @@ from typing import Any, Iterator
 
 from .canonical import canonical_json, sha256_json
 from .schema import normalize_and_validate
+from .evaluation_contract import HARD_COMPONENTS, REQUIRED_TEST_TYPES, SUPPLEMENTAL_TEST_TYPES, TEST_COMPONENT
 
 ENVIRONMENTS = {"sandbox", "staging", "production"}
 FRAMEWORKS = {
@@ -462,6 +463,44 @@ class Registry:
         if not isinstance(suite.get("thresholds", {}), dict):
             raise RegistryError("suite thresholds must be an object")
         normalized = normalize_and_validate(suite, {"type": "object", "additionalProperties": True})
+        supported_types = set(REQUIRED_TEST_TYPES)
+        seen_test_ids: set[str] = set()
+        for index, case in enumerate(normalized["tests"], start=1):
+            if not isinstance(case, dict):
+                raise RegistryError("each evaluation test must be an object")
+            test_type = case.get("test_type")
+            if test_type not in supported_types:
+                raise RegistryError(f"unsupported test type {test_type!r}")
+            test_id = case.get("test_id", f"test-{index}")
+            if not isinstance(test_id, str) or not test_id:
+                raise RegistryError("test_id must be a non-empty string")
+            if test_id in seen_test_ids:
+                raise RegistryError(f"duplicate evaluation test_id {test_id!r}")
+            seen_test_ids.add(test_id)
+            required = case.get("required", True)
+            if not isinstance(required, bool):
+                raise RegistryError(f"test {test_id!r} required flag must be boolean")
+            if test_type in SUPPLEMENTAL_TEST_TYPES and required is not True:
+                raise RegistryError(f"normative test type {test_type!r} cannot be optional")
+            if "ignored_fields" in case and (
+                not isinstance(case["ignored_fields"], list)
+                or any(not isinstance(field, str) for field in case["ignored_fields"])
+            ):
+                raise RegistryError(f"test {test_id!r} ignored_fields must be a list of strings")
+            if "repeat_count" in case:
+                repeats = case["repeat_count"]
+                if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1 or repeats > 1000:
+                    raise RegistryError(f"test {test_id!r} repeat_count must be an integer from 1 to 1000")
+                if test_type == "determinism" and repeats < 2:
+                    raise RegistryError("determinism tests must repeat at least twice")
+            elif test_type == "determinism":
+                raise RegistryError("determinism tests must declare repeat_count >= 2")
+        required_types = normalized.get("required_test_types", list(REQUIRED_TEST_TYPES))
+        if not isinstance(required_types, list) or any(value not in supported_types for value in required_types):
+            raise RegistryError("required_test_types must contain supported test type names")
+        threshold = normalized.get("thresholds", {}).get("minimum_performance_score", 0.0)
+        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(threshold) or not 0 <= threshold <= 1:
+            raise RegistryError("minimum_performance_score must be finite and between 0 and 1")
         suite_hash = sha256_json(normalized)
         with self._transaction() as conn:
             existing = conn.execute("SELECT * FROM evaluation_suites WHERE suite_id=?", (suite_id,)).fetchone()
@@ -501,10 +540,66 @@ class Registry:
             raise RegistryError("evaluation spec_hash does not match immutable version")
         if suite["agent_id"] != agent_id or suite["version"] != version:
             raise RegistryError("suite target does not match evaluation target")
-        if status == "passed" and (not floors_met or not coverage_complete):
-            raise RegistryError("passing evaluation requires all floors and complete coverage")
+        if not isinstance(floors_met, bool) or not isinstance(coverage_complete, bool):
+            raise RegistryError("floors_met and coverage_complete must be booleans")
+        if not isinstance(component_scores, dict):
+            raise RegistryError("component_scores must be an object")
+        for name, value in component_scores.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+                raise RegistryError(f"component score {name!r} must be finite and between 0 and 1")
+        if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score) or not 0 <= score <= 1:
+            raise RegistryError("composite score must be finite and between 0 and 1")
+        if not isinstance(results, list) or any(not isinstance(result, dict) for result in results):
+            raise RegistryError("evaluation results must be a list of objects")
+        if status == "passed":
+            if not floors_met or not coverage_complete:
+                raise RegistryError("passing evaluation requires all floors and complete coverage")
+            missing = set(HARD_COMPONENTS) - set(component_scores)
+            if missing:
+                raise RegistryError(f"passing evaluation is missing hard component scores: {sorted(missing)}")
+            if any(component_scores[name] != 1.0 for name in HARD_COMPONENTS):
+                raise RegistryError("passing evaluation requires every hard component score to equal 1.0")
+            if "performance_score" not in component_scores:
+                raise RegistryError("passing evaluation requires an observed performance_score")
+            performance_floor = suite["suite"].get("thresholds", {}).get("minimum_performance_score", 0.0)
+            if component_scores["performance_score"] < performance_floor:
+                raise RegistryError("performance score is below the immutable suite threshold")
+            suite_cases = suite["suite"]["tests"]
+            suite_types = {case["test_type"] for case in suite_cases}
+            missing_types = set(REQUIRED_TEST_TYPES) - suite_types
+            if missing_types:
+                raise RegistryError(f"passing evaluation suite omits required test types: {sorted(missing_types)}")
+            if len(results) != len(suite_cases):
+                raise RegistryError("passing evaluation result count does not match immutable suite test count")
+            observed_by_component = {name: [] for name in HARD_COMPONENTS}
+            for index, (case, result) in enumerate(zip(suite_cases, results, strict=True), start=1):
+                test_type = case["test_type"]
+                expected_id = case.get("test_id", f"test-{index}")
+                expected_component = TEST_COMPONENT.get(test_type, test_type)
+                if result.get("test_id") != expected_id or result.get("test_type") != test_type:
+                    raise RegistryError("evaluation result identity does not match the immutable suite")
+                if result.get("component") != expected_component:
+                    raise RegistryError(f"evaluation result component mismatch for test {expected_id!r}")
+                if not isinstance(result.get("passed"), bool):
+                    raise RegistryError(f"evaluation result {expected_id!r} passed must be boolean")
+                required = case.get("required", True)
+                if (required or test_type in SUPPLEMENTAL_TEST_TYPES) and result["passed"] is not True:
+                    raise RegistryError(f"passing evaluation contains a failed required test: {expected_id!r}")
+                if expected_component in observed_by_component:
+                    observed_by_component[expected_component].append(result["passed"])
+            for component in HARD_COMPONENTS:
+                values = observed_by_component[component]
+                if not values:
+                    raise RegistryError(f"passing evaluation has no result evidence for {component}")
+                observed_score = sum(values) / len(values)
+                if not math.isclose(float(component_scores[component]), observed_score, rel_tol=0.0, abs_tol=1e-9):
+                    raise RegistryError(f"component score {component!r} does not match its immutable result evidence")
         start = started_at if started_at is not None else time.time()
         finish = completed_at if completed_at is not None else time.time()
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in (start, finish)):
+            raise RegistryError("evaluation timestamps must be finite numbers")
+        if finish < start:
+            raise RegistryError("evaluation completed_at cannot precede started_at")
         row = {
             "run_id": run_id, "agent_id": agent_id, "version": version,
             "spec_hash": spec_hash, "suite_id": suite_id, "suite_hash": suite["suite_hash"],
@@ -538,7 +633,19 @@ class Registry:
         result["coverage_complete"] = bool(result["coverage_complete"])
         result["component_scores"] = self._json(result.pop("component_scores_json"))
         result["results"] = self._json(result.pop("results_json"))
-        result["passed"] = result["status"] == "passed" and result["floors_met"] and result["coverage_complete"]
+        suite = self.get_evaluation_suite(result["suite_id"])
+        performance_floor = suite["suite"].get("thresholds", {}).get("minimum_performance_score", 0.0)
+        scores = result["component_scores"]
+        hard_scores_valid = all(scores.get(name) == 1.0 for name in HARD_COMPONENTS)
+        performance = scores.get("performance_score")
+        performance_valid = (
+            isinstance(performance, (int, float)) and not isinstance(performance, bool)
+            and math.isfinite(performance) and performance >= performance_floor
+        )
+        result["passed"] = (
+            result["status"] == "passed" and result["floors_met"] and result["coverage_complete"]
+            and hard_scores_valid and performance_valid
+        )
         return result
 
     def record_approval(

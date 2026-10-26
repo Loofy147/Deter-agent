@@ -11,19 +11,7 @@ from .canonical import canonical_json, normalize_json, sha256_json
 from .registry import Registry, RegistryError
 from .rules import Rule, RuleSet
 
-HARD_COMPONENTS = (
-    "determinism_score", "regression_score", "policy_score", "schema_score",
-    "state_transition_score", "tie_break_score", "failure_path_score",
-)
-TEST_COMPONENT = {
-    "determinism": "determinism_score",
-    "regression": "regression_score",
-    "policy": "policy_score",
-    "schema": "schema_score",
-    "state_transition": "state_transition_score",
-    "tie_break": "tie_break_score",
-    "failure_path": "failure_path_score",
-}
+from .evaluation_contract import HARD_COMPONENTS, REQUIRED_TEST_TYPES, SUPPLEMENTAL_TEST_TYPES, TEST_COMPONENT
 
 
 def _without_fields(value: Any, ignored: set[str]) -> Any:
@@ -55,7 +43,7 @@ class EvaluationHarness:
         covered_types = set()
         for case in suite["tests"]:
             test_type = case.get("test_type")
-            if test_type not in TEST_COMPONENT:
+            if test_type not in TEST_COMPONENT and test_type not in SUPPLEMENTAL_TEST_TYPES:
                 raise RegistryError(f"unsupported test type {test_type!r}")
             covered_types.add(test_type)
             repeats = case.get("repeat_count", 1) if test_type == "determinism" else 1
@@ -79,8 +67,9 @@ class EvaluationHarness:
                 passed = canonical_json(actual) == canonical_json(expected)
             if passed and case.get("expected_reason_code") is not None:
                 passed = outputs[-1].get("reason_code") == case["expected_reason_code"]
-            component = TEST_COMPONENT[test_type]
-            component_results[component].append(bool(passed))
+            component = TEST_COMPONENT.get(test_type, test_type)
+            if component in component_results:
+                component_results[component].append(bool(passed))
             required = case.get("required", True)
             if required and not passed:
                 all_required_pass = False
@@ -102,7 +91,8 @@ class EvaluationHarness:
         component_scores["performance_score"] = performance_observed
         floors_met = all(component_scores[name] == 1.0 for name in HARD_COMPONENTS) and performance_observed >= performance_floor
 
-        required_coverage = set(suite.get("required_test_types", list(TEST_COMPONENT)))
+        # Safety-critical coverage classes are normative and cannot be disabled by a suite override.
+        required_coverage = set(suite.get("required_test_types", list(REQUIRED_TEST_TYPES))) | set(REQUIRED_TEST_TYPES)
         coverage_complete = required_coverage.issubset(covered_types)
         # Any hard component without a test means evidence is missing, even if suite author omitted coverage metadata.
         coverage_complete = coverage_complete and all(component_results[name] for name in HARD_COMPONENTS)
