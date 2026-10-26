@@ -5,7 +5,7 @@ import copy
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
-from .canonical import canonical_json
+from .canonical import canonical_json, sha256_json
 from .registry import Registry
 
 
@@ -50,6 +50,27 @@ def change_condition(rule_id: str, field: str, value: Any) -> RuleMutant:
         _find_rule(spec, rule_id).setdefault("when", {})[field] = {"eq": value}
         return spec
     return RuleMutant(f"condition:{rule_id}:{field}", transform, "condition_change")
+
+
+def change_field(path: tuple[str, ...], value: Any, *, operator: str = "field_change") -> RuleMutant:
+    """Mutate an arbitrary nested JSON-spec field for policy/runtime/promotion campaigns."""
+    if not path or any(not isinstance(part, str) or not part for part in path):
+        raise ValueError("path must contain non-empty string field names")
+    replacement = copy.deepcopy(value)
+    path_label = ".".join(path)
+
+    def transform(spec):
+        target = spec
+        for part in path[:-1]:
+            if not isinstance(target, dict) or part not in target:
+                raise KeyError(f"nested mutation path not found: {path_label}")
+            target = target[part]
+        if not isinstance(target, dict):
+            raise TypeError(f"mutation parent is not an object: {path_label}")
+        target[path[-1]] = copy.deepcopy(replacement)
+        return spec
+
+    return RuleMutant(f"field:{path_label}:{sha256_json(replacement)[:12]}", transform, operator)
 
 
 @dataclass(frozen=True)
