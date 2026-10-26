@@ -450,19 +450,24 @@ class RuntimeEngine:
                 and approval["approver"] != approval["requested_by"]
                 and self._scope_covers(approval["scope"], decision)
             ):
-                return self._result("rejected", "APPROVAL_MISMATCH", "approval does not bind to this frozen decision")
+                result = self._result("rejected", "APPROVAL_MISMATCH", "approval does not bind to this frozen decision")
+                return result
             current = self.registry.resolve_version(frozen["agent_id"], frozen["version"], frozen["environment"])
             current_policy = current.get("environment_policy")
             if not current_policy or current_policy["policy_hash"] != decision["policy_hash"]:
-                return self._result("rejected", "POLICY_VERSION_MISMATCH", "the policy changed while approval was pending")
+                result = self._result("rejected", "POLICY_VERSION_MISMATCH", "the policy changed while approval was pending")
+                return result
             if self.gateway.catalog.hash != decision["catalog_hash"]:
-                return self._result("rejected", "TOOL_CATALOG_MISMATCH", "tool catalogue changed while approval was pending")
+                result = self._result("rejected", "TOOL_CATALOG_MISMATCH", "tool catalogue changed while approval was pending")
+                return result
             state, state_version = self.registry.load_state(frozen["agent_id"], frozen["request_id"])
             if state_version != frozen["state_version"]:
-                return self._result("rejected", "STATE_VERSION_CONFLICT", "state changed while approval was pending")
+                result = self._result("rejected", "STATE_VERSION_CONFLICT", "state changed while approval was pending")
+                return result
             token = str(uuid.uuid4())
             if not self.registry.claim_state(frozen["agent_id"], frozen["request_id"], state_version, token, lease_seconds=self.claim_lease_seconds):
-                return self._result("escalated", "STATE_VERSION_CONFLICT", "state is currently claimed")
+                result = self._result("escalated", "STATE_VERSION_CONFLICT", "state is currently claimed")
+                return result
             claim_active = True
             if not self.registry.claim_approval_resume(idempotency_key):
                 latest = self.registry.lookup_request_result(

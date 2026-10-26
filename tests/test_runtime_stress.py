@@ -95,6 +95,14 @@ class RuntimeStressTests(unittest.TestCase):
         self.assertEqual(resumed["reason_code"], "APPROVAL_MISMATCH")
         self.assertEqual(calls, [], "expired approval executed an external action")
         self.assertEqual(self.registry.load_state("agent-a", "expired-approval")[1], 0)
+        trace_statuses = [
+            row[0] for row in self.registry._connection.execute(
+                "SELECT status FROM traces WHERE request_id=?", ("expired-approval",)
+            ).fetchall()
+        ]
+        self.assertEqual(trace_statuses.count("rejected"), 1)
+        self.assertEqual(trace_statuses.count("failed"), 0, "resume trace must match the returned rejection")
+        self.assertGreaterEqual(runtime.metrics["rejected"], 1)
 
     def test_trace_and_approval_evidence_are_append_only(self):
         runtime = RuntimeEngine(self.registry, self.gateway, {"create_ticket": lambda payload, idempotency_key=None: {"ok": True, "ticket_id": "T-IMMUTABLE"}})
