@@ -4,6 +4,7 @@ system:
   purpose: Control, improve, and build deterministic agents under measurable governance.
   default_autonomy_level: 3
   default_autonomy_name: Sandbox
+  autonomy_applies_to: meta_agents_only
 
 principles:
   - Same input plus same state plus same policy version should produce the same output.
@@ -100,10 +101,9 @@ agent_requirements:
     - evaluation_suite
     - metrics
     - logs
-    - rollback_version
 
 frameworks:
-  rule_based_system:
+  rule_based:
     best_for: Simple explicit business logic.
   decision_table:
     best_for: Many condition and action combinations.
@@ -111,7 +111,7 @@ frameworks:
     best_for: Strict lifecycle control.
   workflow_engine:
     best_for: Multi-step operational orchestration.
-  constraint_based_system:
+  constraint_based:
     best_for: Hard policy and safety boundaries.
   deterministic_scoring:
     best_for: Ranking and prioritization.
@@ -141,7 +141,7 @@ metrics:
     - retry_rate
     - verification_failure_rate
   determinism:
-    - same_input_same_output_rate
+    - determinism_rate
     - tie_break_usage_count
     - rule_conflict_count
   operations:
@@ -160,22 +160,39 @@ metrics:
 control_modes:
   - level: 0
     name: Manual
-    production_changes_allowed: false
+    scope: meta_agent_only
+    approval_requirement: never
   - level: 1
     name: Recommend
-    production_changes_allowed: false
+    scope: meta_agent_only
+    approval_requirement: never
   - level: 2
     name: Draft
-    production_changes_allowed: false
+    scope: meta_agent_only
+    approval_requirement: never
   - level: 3
     name: Sandbox
-    production_changes_allowed: false
+    scope: meta_agent_only
+    approval_requirement: never
   - level: 4
     name: Staged
-    production_changes_allowed: approval_required
+    scope: meta_agent_only
+    approval_requirement: staging_and_production
   - level: 5
     name: Production
-    production_changes_allowed: explicit_approval_required
+    scope: meta_agent_only
+    approval_requirement: production_only
+
+conditional_fields:
+  rollback_version:
+    type: string_or_null
+    required_when: production_pointer_already_exists
+
+canonical_contract:
+  path: contracts/deterministic-control-contract.json
+  version: "1.0.0"
+  framework_enum_source: contracts/deterministic-control-contract.json
+  determinism_metric: determinism_rate
 
 guardrails:
   - No silent self-modification of production agents.
@@ -185,3 +202,5 @@ guardrails:
   - No hidden state as a decision source.
   - No change without regression tests.
   - No external side effects from sandbox tests unless explicitly allowed.
+  - Runtime agents cannot set or inherit meta-agent autonomy configuration.
+  - Runtime decisions must bind spec_hash, engine_version, state_version, and reference_data_version.

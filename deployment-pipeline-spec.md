@@ -267,7 +267,7 @@ Rollback requirements:
 For higher-risk agents, use canary deployment.
 
 ```text
-5% traffic → monitor → 25% traffic → monitor → 100% traffic
+Deterministic cohort buckets: 5% → monitor → 25% → monitor → 100%. Assign each logical request using int(sha256(UTF8(request_id)).hexdigest(), 16) % 100; random assignment is forbidden.
 ```
 
 Canary promotion requires:
@@ -297,30 +297,43 @@ rollback_thresholds:
 ## 11. Deployment gate pseudocode
 
 ```python
-def can_promote(agent_id, version, target_environment):
-    spec = registry.get_agent_version(agent_id, version)
-    eval_report = registry.get_latest_evaluation(agent_id, version)
-    policy = registry.get_permission_policy(agent_id, version, target_environment)
-
-    if not spec.is_complete():
-        return deny("Agent spec incomplete")
-
-    if not eval_report.passed_required_thresholds():
-        return deny("Evaluation failed")
-
-    if not policy.exists():
-        return deny("Permission policy missing")
-
-    if target_environment == "production":
-        if not approval.exists(agent_id, version, "production"):
-            return deny("Production approval missing")
-        if not spec.rollback_version:
-            return deny("Rollback version missing")
-
-    return allow("Promotion approved")
+def can_promote(agent_id, version, env):
+    v = registry.version(agent_id, version)
+    prev = registry.env_pointer(agent_id, env)
+    if not stage_order_ok(v, env):
+        return deny("STAGE_SKIPPED")
+    if not v.is_immutable or not v.spec_hash:
+        return deny("SPEC_HASH_MISMATCH")
+    ev = registry.latest_eval(agent_id, version, spec_hash=v.spec_hash)
+    if not (ev and ev.status == "passed" and ev.floors_met and ev.coverage_complete):
+        return deny("EVALUATION_FLOOR_FAILED")
+    policy = registry.version_policy(version_id=v.id, environment=env)
+    if not policy:
+        return deny("POLICY_DENIED")
+    diff_hash = sha256(jcs(policy_diff(prev.policy_snapshot if prev else None, policy.snapshot)))
+    approval_id = None
+    if env in ("staging", "production"):
+        ap = registry.approval(agent_id, version, env, v.spec_hash, ev.run_id, diff_hash)
+        if not (ap and ap.decision == "approved" and not ap.expired
+                and ap.approver != ap.requested_by
+                and approval_scope_covers(ap.scope, policy_diff_hash=diff_hash)):
+            return deny("APPROVAL_EXPIRED_OR_MISMATCHED")
+        approval_id = ap.approval_id
+    if env == "production":
+        if not staging_succeeded_for(agent_id, version, v.spec_hash):
+            return deny("STAGING_NOT_VERIFIED")
+        if prev and not previously_approved_rollback_target(v.rollback_version):
+            return deny("ROLLBACK_TARGET_MISSING")
+    binding = {
+        "agent_id": agent_id, "version": version, "target_environment": env,
+        "spec_hash": v.spec_hash, "eval_run_id": ev.run_id,
+        "approval_event_id": approval_id, "policy_diff_hash": diff_hash
+    }
+    registry.append_promotion_record(binding, sha256(jcs(binding)))
+    return allow()
 ```
 
----
+Approval must be approved, unexpired and independently requested, and must bind the exact target version, environment, spec hash, evaluation run and policy diff. Permission expansions require `permission_change` scope. Rollback is a production change and may target only a previously approved version; record it immutably.
 
 ## 12. Deployment checklist
 
@@ -342,3 +355,13 @@ def can_promote(agent_id, version, target_environment):
 
 ## Summary
 The Deployment Pipeline turns the agentic system into a controlled production system. It allows agents to evolve while preserving review, testing, rollback, and auditability.
+
+
+## 13. Normative deterministic-control contract
+
+**Normative source:** [DETERMINISTIC-CONTROL-CONTRACT.md](DETERMINISTIC-CONTROL-CONTRACT.md) and [contracts/deterministic-control-contract.json](contracts/deterministic-control-contract.json).
+
+- The promotion binding is `sha256(jcs({agent_id, version, target_environment, spec_hash, eval_run_id, approval_event_id, policy_diff_hash}))`. Store it as an append-only promotion record. Evaluation, approval, runtime gateway scope, and pipeline must match this exact binding; existence of an unrelated approval is not sufficient.
+- Production requires successful staging for the same spec hash, passed component floors, complete suite coverage, an unexpired independent approval, and a policy-diff hash matching that approval.
+- Any policy expansion requires `permission_change` scope. Rollback is a production change: pre-authorize rollback only to a previously approved version and log the promotion/rollback binding.
+- Canary cohorts derive solely from the stable logical `request_id` hash. A retry preserves cohort assignment.

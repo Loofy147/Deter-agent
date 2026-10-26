@@ -1,0 +1,469 @@
+{
+  "contract_version": "1.0.0",
+  "purpose": "Normative source of truth for deterministic agent identity, evaluation, permissions, runtime replay, and promotion.",
+  "precedence": {
+    "rule": "This contract and contracts/deterministic-control-contract.json override conflicting illustrative statements in prose specifications.",
+    "spec_manifest_path": "contracts/deterministic-control-contract.json"
+  },
+  "canonicalization": {
+    "standard": "RFC 8785 JSON Canonicalization Scheme (JCS)",
+    "spec_hash": "sha256(jcs(immutable_agent_spec))",
+    "unicode_normalization": "NFC",
+    "object_keys": "sorted",
+    "rule_iteration": "sorted_by_rule_resolution",
+    "money_representation": "integer_minor_units",
+    "reject_unknown_fields": true,
+    "per_intent_schema_additional_properties": false,
+    "timestamp_source": "input.received_at",
+    "reference_data": "snapshot_before_decision_and_record_reference_data_version"
+  },
+  "enums": {
+    "framework": [
+      "rule_based",
+      "decision_table",
+      "finite_state_machine",
+      "workflow_engine",
+      "constraint_based",
+      "deterministic_scoring",
+      "hybrid_rule_workflow"
+    ],
+    "environment": [
+      "sandbox",
+      "staging",
+      "production"
+    ],
+    "policy_decision": [
+      "allow",
+      "deny",
+      "require_approval",
+      "sandbox_only",
+      "mock_only"
+    ],
+    "agent_lifecycle": [
+      "draft",
+      "sandbox",
+      "staging",
+      "production",
+      "retired"
+    ],
+    "evaluation_status": [
+      "passed",
+      "failed",
+      "error"
+    ],
+    "approval_decision": [
+      "approved",
+      "rejected",
+      "expired"
+    ],
+    "approval_requirement": [
+      "never",
+      "out_of_band_only",
+      "staging_and_production",
+      "production_only",
+      "always"
+    ],
+    "reason_code": [
+      "INPUT_VALIDATION_FAILED",
+      "REGISTRY_LOOKUP_FAILED",
+      "POLICY_DENIED",
+      "APPROVAL_REQUIRED",
+      "APPROVAL_EXPIRED",
+      "SPEC_HASH_MISMATCH",
+      "EVALUATION_FAILED",
+      "EVALUATION_FLOOR_FAILED",
+      "STAGE_SKIPPED",
+      "STAGING_NOT_VERIFIED",
+      "PERMISSION_EXPANSION_NOT_APPROVED",
+      "ROLLBACK_TARGET_MISSING",
+      "STATE_VERSION_CONFLICT",
+      "TOOL_TIMEOUT",
+      "TOOL_FAILURE",
+      "VERIFICATION_FAILED",
+      "UNAUTHORIZED_TOOL_ATTEMPT",
+      "NO_RULE_MATCHED"
+    ]
+  },
+  "rule_resolution": {
+    "order": [
+      "priority ASC",
+      "specificity DESC",
+      "risk_rank ASC",
+      "rule_id ASC"
+    ],
+    "lower_priority_number_wins": true,
+    "priority_may_repeat": true,
+    "required_unique_field": "rule_id",
+    "specificity": "count_of_distinct_fields_constrained_by_condition",
+    "risk_rank": {
+      "low": 0,
+      "medium": 1,
+      "high": 2,
+      "critical": 3
+    },
+    "timestamps_in_ordering": false,
+    "action_names_in_ordering": false,
+    "no_match_behavior": "explicit_fallback_rule_only"
+  },
+  "promotion": {
+    "binding_fields": [
+      "agent_id",
+      "version",
+      "target_environment",
+      "spec_hash",
+      "eval_run_id",
+      "approval_event_id",
+      "policy_diff_hash"
+    ],
+    "binding_formula": "sha256(jcs({agent_id, version, target_environment, spec_hash, eval_run_id, approval_event_id, policy_diff_hash}))",
+    "evaluation_must_match_spec_hash": true,
+    "approval_must_bind_to": [
+      "agent_id",
+      "version",
+      "target_environment",
+      "spec_hash",
+      "eval_run_id",
+      "policy_diff_hash"
+    ],
+    "approval_decision_must_equal": "approved",
+    "approval_must_be_unexpired": true,
+    "approver_must_differ_from_requester": true,
+    "staging_success_required_before_production": true,
+    "stage_skipping_allowed": false,
+    "permission_expansion_requires_scope": "permission_change",
+    "first_production_release_requires_rollback_target": false,
+    "subsequent_production_release_requires_rollback_target": true,
+    "rollback_must_target_previously_approved_version": true
+  },
+  "registry": {
+    "agents_table_excludes": [
+      "status",
+      "current_version"
+    ],
+    "environment_pointer_table": {
+      "name": "env_pointers",
+      "key": [
+        "agent_id",
+        "environment"
+      ],
+      "fields": [
+        "agent_id",
+        "environment",
+        "version_id",
+        "updated_at",
+        "updated_by"
+      ]
+    },
+    "version_policy_join_table": {
+      "name": "version_policies",
+      "key": [
+        "version_id",
+        "environment"
+      ],
+      "fields": [
+        "version_id",
+        "environment",
+        "policy_id",
+        "policy_version",
+        "policy_hash"
+      ]
+    },
+    "required_evaluation_binding_fields": [
+      "spec_hash",
+      "suite_hash",
+      "policy_version",
+      "engine_version"
+    ],
+    "required_approval_binding_fields": [
+      "spec_hash",
+      "eval_run_id",
+      "expires_at",
+      "policy_diff_hash",
+      "scope"
+    ],
+    "append_only_tables": [
+      "evaluation_runs",
+      "approval_events",
+      "traces",
+      "promotion_records"
+    ],
+    "suite_author_must_differ_from_target_author": true,
+    "version_specs_immutable_after_registration": true
+  },
+  "runtime": {
+    "states": [
+      "queued",
+      "started",
+      "normalizing",
+      "validating",
+      "loading_state",
+      "deciding",
+      "checking_permissions",
+      "approval_pending",
+      "executing",
+      "verifying",
+      "completed",
+      "failed",
+      "rejected",
+      "escalated"
+    ],
+    "terminal_states": [
+      "completed",
+      "failed",
+      "rejected",
+      "escalated"
+    ],
+    "transitions": {
+      "queued": [
+        "started",
+        "rejected",
+        "failed",
+        "escalated"
+      ],
+      "started": [
+        "normalizing",
+        "rejected",
+        "failed",
+        "escalated"
+      ],
+      "normalizing": [
+        "validating",
+        "rejected",
+        "failed",
+        "escalated"
+      ],
+      "validating": [
+        "loading_state",
+        "rejected",
+        "failed",
+        "escalated"
+      ],
+      "loading_state": [
+        "deciding",
+        "failed",
+        "escalated"
+      ],
+      "deciding": [
+        "checking_permissions",
+        "rejected",
+        "failed",
+        "escalated"
+      ],
+      "checking_permissions": [
+        "approval_pending",
+        "executing",
+        "rejected",
+        "failed",
+        "escalated"
+      ],
+      "approval_pending": [
+        "executing",
+        "rejected",
+        "escalated"
+      ],
+      "executing": [
+        "executing",
+        "verifying",
+        "failed",
+        "escalated"
+      ],
+      "verifying": [
+        "completed",
+        "failed",
+        "escalated"
+      ]
+    },
+    "decision_frozen_across_approval_pause": true,
+    "resume_source": "immutable_frozen_decision_record",
+    "trace_and_metrics_finalization": "try_finally_for_every_terminal_or_paused_path",
+    "policy_decision_behavior": {
+      "deny": "reject_and_log",
+      "require_approval": "freeze_decision_and_pause",
+      "sandbox_only": "execute_only_in_sandbox_otherwise_reject",
+      "mock_only": "use_mock_adapter_never_live_adapter",
+      "allow": "execute_subject_to_environment_and_resource_scope"
+    },
+    "unknown_or_unlisted_tool": "deny_log_and_increment_unauthorized_tool_attempt_count",
+    "caller_may_not_supply": [
+      "data_class",
+      "risk_level"
+    ],
+    "data_class_and_risk_source": "versioned_resource_and_tool_catalog",
+    "state_write": "compare_and_swap_on_state_version",
+    "decision_records_must_include": [
+      "state_version_read",
+      "reference_data_version",
+      "spec_hash",
+      "engine_version"
+    ]
+  },
+  "idempotency": {
+    "request_id": "stable_logical_request_id_required_at_intake",
+    "action_id": "assigned_after_decision",
+    "formula": "sha256(jcs([agent_id, version, spec_hash, request_id, action_id]))",
+    "excludes": [
+      "job_id",
+      "wall_clock_time"
+    ],
+    "catalog_required_fields": [
+      "idempotent",
+      "supports_idempotency_key"
+    ],
+    "maximum_retries": 1,
+    "retry_allowed_only_when": [
+      "action.idempotent == true",
+      "action.supports_idempotency_key == true"
+    ],
+    "retries_reuse_same_key": true
+  },
+  "replay_tuple": [
+    "normalized_input",
+    "initial_state_snapshot",
+    "state_version",
+    "rule_set_hash",
+    "reference_data_version",
+    "policy_version",
+    "action_catalog_version",
+    "spec_hash",
+    "engine_version",
+    "input.received_at"
+  ],
+  "evaluation": {
+    "hard_component_floors": {
+      "determinism_score": 1,
+      "regression_score": 1,
+      "policy_score": 1,
+      "schema_score": 1,
+      "state_transition_score": 1,
+      "tie_break_score": 1,
+      "failure_path_score": 1
+    },
+    "performance_floor": "explicit_per_suite_threshold",
+    "composite_score": "informational_only_not_a_substitute_for_component_floors",
+    "required_test_classes": [
+      "determinism",
+      "schema",
+      "regression",
+      "policy",
+      "state_transition",
+      "tie_break",
+      "failure_path",
+      "threshold_boundary",
+      "approval_binding"
+    ],
+    "determinism_test_processes": "separate_processes_with_varied_PYTHONHASHSEED_and_shuffled_key_order",
+    "normalization_property": "normalize(normalize(x)) == normalize(x)",
+    "reason_comparison": "reason_code_enum",
+    "coverage_check_on_attach": true,
+    "evaluation_status_error_is_never_pass": true
+  },
+  "deployment": {
+    "stage_order": [
+      "draft",
+      "sandbox",
+      "evaluation",
+      "review",
+      "staging",
+      "production",
+      "monitoring",
+      "retired"
+    ],
+    "canary_assignment": "int(sha256(UTF8(request_id)).hexdigest(), 16) % 100",
+    "random_assignment": false,
+    "live_rollback": "pre-authorize_only_rollback_to_previously_approved_version",
+    "require_independent_approver": true,
+    "approval_expiry_checked_at_promotion": true
+  },
+  "bootstrap": {
+    "trust_root_seed_required": true,
+    "seed_must_be_operator_signed": true,
+    "records_must_be_hash_pinned": true,
+    "created_by": "bootstrap",
+    "expires_after_build_step": 8,
+    "bootstrap_scope": "only_for_initial_unregistered_evaluation_agent_before_regular_registry_validation"
+  },
+  "static_checks": [
+    "enum_single_source_and_generated_consistency",
+    "priority_is_integer_and_rule_id_is_unique",
+    "rule_shadowing",
+    "decision_table_totality_and_overlap",
+    "each_operation_has_a_rule",
+    "every_agent_has_an_explicit_fallback_rule",
+    "fsm_reachability_and_dead_ends",
+    "terminal_states_are_absorbing",
+    "all_transitions_are_declared",
+    "all_framework_values_are_canonical",
+    "environment_policy_exists_for_every_supported_environment",
+    "evaluation_coverage_matrix_is_complete_on_attach",
+    "schema_unknown_fields_rejected",
+    "promotion_binding_is_complete",
+    "approval_binding_and_expiry",
+    "append_only_audit_tables",
+    "action_retry_metadata_is_complete"
+  ],
+  "metrics": {
+    "canonical_determinism_metric": "determinism_rate",
+    "forbidden_legacy_aliases": [
+      "same_input_same_output_rate",
+      "consistency_rate"
+    ],
+    "dictionary": {
+      "determinism_rate": {
+        "formula": "identical_replay_outputs / replay_attempts",
+        "window": "evaluation_run"
+      },
+      "policy_violation_count": {
+        "formula": "count(policy_decision = deny_due_to_violation)",
+        "window": "request_window_24h"
+      },
+      "unauthorized_tool_attempt_count": {
+        "formula": "count(unlisted_or_blocked_runtime_tool_attempts)",
+        "window": "request_window_24h"
+      },
+      "retry_rate": {
+        "formula": "retried_actions / eligible_actions",
+        "window": "request_window_24h"
+      },
+      "verification_failure_rate": {
+        "formula": "failed_verifications / verification_attempts",
+        "window": "request_window_24h"
+      },
+      "escalation_rate": {
+        "formula": "escalated_runs / completed_or_escalated_runs",
+        "window": "request_window_24h"
+      },
+      "human_override_rate": {
+        "formula": "overridden_decisions / reviewed_decisions",
+        "window": "request_window_7d"
+      },
+      "p95_latency_ms": {
+        "formula": "95th_percentile(completed_at - started_at)",
+        "window": "request_window_24h"
+      },
+      "trace_completeness": {
+        "formula": "runs_with_required_trace_fields / total_runs",
+        "window": "request_window_24h"
+      }
+    }
+  },
+  "design_decisions": [
+    {
+      "decision": "Allow duplicate priority values",
+      "rationale": "Unique priority values make specificity, risk, and rule_id tie-breaks unreachable for valid rules. Stable rule_id uniqueness plus the complete total order preserves determinism and permits meaningful equal-priority tests."
+    },
+    {
+      "decision": "Keep agent lifecycle separate from environment pointers",
+      "rationale": "An agent may have different active versions in sandbox, staging, and production; a single status/current_version pair cannot represent that safely."
+    }
+  ],
+  "build_order": [
+    "canonicalization_and_shared_enums",
+    "registry_with_static_checks",
+    "permission_gateway_deny_all_stub",
+    "runtime",
+    "evaluation_harness",
+    "deployment_gate",
+    "operator_signed_bootstrap_seed",
+    "first_agents"
+  ]
+}

@@ -393,3 +393,8 @@ Required guardrails:
 
 ## Summary
 The Agentic Deterministic Control System is a governed meta-agent architecture. It controls existing deterministic agents, improves them through measured feedback loops, and builds new ones through an agent factory — while keeping every change explicit, tested, versioned, and auditable.
+
+
+## Normative implementation contract
+
+Use [DETERMINISTIC-CONTROL-CONTRACT.md](DETERMINISTIC-CONTROL-CONTRACT.md) and [contracts/deterministic-control-contract.json](contracts/deterministic-control-contract.json) as normative. The architecture diagram is illustrative; production behavior must obey the exact promotion binding, default-deny gateway, deterministic replay tuple, and stage order defined by that contract.
