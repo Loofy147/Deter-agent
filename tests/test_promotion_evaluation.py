@@ -65,7 +65,7 @@ class PolicyDiffAdversarialTests(unittest.TestCase):
         self.assertTrue(diff["expansions"]["sandbox_side_effects_allowed"]["to"])
         self.assertIn("create_ticket", diff["expansions"]["tool_modes"])
         self.assertIn("send_message", diff["expansions"]["tool_modes"])
-        self.assertTrue(diff["restrictions"]["tool_modes"].get("send_message") is None)
+        self.assertNotIn("tool_modes", diff["restrictions"])
 
     def test_empty_data_class_allowlist_is_unrestricted(self):
         unrestricted = make_policy("production", policy_id="policy-unrestricted")
