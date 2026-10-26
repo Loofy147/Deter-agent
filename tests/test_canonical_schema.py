@@ -1,4 +1,5 @@
 import math
+import struct
 import unittest
 
 from deter_agent.canonical import CanonicalizationError, canonical_json, normalize_json, sha256_json
@@ -26,6 +27,29 @@ class CanonicalizationTests(unittest.TestCase):
 
     def test_number_formatting(self):
         self.assertEqual(canonical_json([1.0, -0.0, 1e-6, 1e-7, 1e20, 1e21]), "[1,0,0.000001,1e-7,100000000000000000000,1e+21]")
+
+    def test_rfc8785_appendix_b_number_serialization_vectors(self):
+        vectors = [
+            ("0000000000000000", "0"),
+            ("8000000000000000", "0"),
+            ("0000000000000001", "5e-324"),
+            ("8000000000000001", "-5e-324"),
+            ("7fefffffffffffff", "1.7976931348623157e+308"),
+            ("ffefffffffffffff", "-1.7976931348623157e+308"),
+            ("4340000000000000", "9007199254740992"),
+            ("c340000000000000", "-9007199254740992"),
+            ("4430000000000000", "295147905179352830000"),
+            ("44b52d02c7e14af5", "9.999999999999997e+22"),
+            ("44b52d02c7e14af6", "1e+23"),
+            ("44b52d02c7e14af7", "1.0000000000000001e+23"),
+            ("444b1ae4d6e2ef4e", "999999999999999700000"),
+            ("444b1ae4d6e2ef4f", "999999999999999900000"),
+            ("444b1ae4d6e2ef50", "1e+21"),
+        ]
+        for ieee_bits, expected in vectors:
+            with self.subTest(ieee_bits=ieee_bits):
+                value = struct.unpack(">d", bytes.fromhex(ieee_bits))[0]
+                self.assertEqual(canonical_json(value), expected)
 
     def test_utf16_key_order(self):
         self.assertEqual(canonical_json({"\ue000": 1, "\U00010000": 2}), '{"\U00010000":2,"\ue000":1}')
