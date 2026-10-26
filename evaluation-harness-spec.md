@@ -192,27 +192,9 @@ ignored_fields:
 
 ## 7. Scoring model
 
-Recommended overall score:
+Hard component floors gate promotion; the composite score is informational only.
 
-```text
-overall_score =
-  0.30 * determinism_score +
-  0.25 * regression_score +
-  0.20 * policy_score +
-  0.15 * schema_score +
-  0.10 * performance_score
-```
-
-Production deployment should require:
-
-```text
-determinism_score = 1.00
-policy_score = 1.00
-regression_score = 1.00
-overall_score >= 0.95
-```
-
----
+Required floors: determinism = 1.00, regression = 1.00, policy = 1.00, schema = 1.00, state transitions = 1.00, tie-break = 1.00, and failure paths = 1.00. Performance must meet an explicit suite-specific floor. A high composite cannot compensate for a failed component floor. A run passes only if all required tests, all floors, and coverage pass; status `error` is never `passed`.
 
 ## 8. Evaluation report format
 
@@ -221,7 +203,7 @@ evaluation_run_id: EVAL-001
 agent_id: support-router-agent
 agent_version: v1.0.0
 status: passed
-overall_score: 0.98
+overall_score: 0.99
 scores:
   determinism: 1.00
   regression: 1.00
@@ -280,21 +262,32 @@ expected_output:
 repeat_count: 1
 ```
 
-### TEST-003: Tie-break behavior
+### TEST-003: Equal-priority tie-break behavior
 
 ```yaml
 test_id: TEST-003
 test_type: tie_break
+rules:
+  - rule_id: TIE-010
+    priority: 10
+    condition: topic = billing
+    specificity: 1
+    risk_rank: 1
+    action: route_to_billing
+  - rule_id: TIE-011
+    priority: 10
+    condition: topic = billing AND severity = critical
+    specificity: 2
+    risk_rank: 2
+    action: route_to_incident_support
 input:
   intent: route_support_request
   payload:
-    topic: billing_and_technical
-    severity: high
-initial_state:
-  status: received
+    topic: billing
+    severity: critical
 expected_output:
-  decision: route_to_incident_support
-pass_condition: Highest severity rule wins before topic-specific rules.
+  matched_rule_id: TIE-011
+pass_condition: Equal priorities resolve by specificity DESC, risk_rank ASC, then rule_id ASC.
 ```
 
 ---
@@ -321,6 +314,8 @@ def run_evaluation(agent_id, version, suite_id):
         results.append(result)
 
     report = score_results(results, suite.thresholds)
+    report.passed = all_required_tests_pass(results) and all_component_floors_met(report) and coverage_complete(suite)
+    # Composite score is informational only.
     registry.record_evaluation_run(report)
     return report
 ```
@@ -376,3 +371,14 @@ Improvement is accepted only if:
 
 ## Summary
 The Evaluation Harness is the evidence engine for the agentic system. It converts proposed builds and improvements into measurable pass/fail decisions before deployment.
+
+
+## 14. Normative deterministic-control contract
+
+**Normative source:** [DETERMINISTIC-CONTROL-CONTRACT.md](DETERMINISTIC-CONTROL-CONTRACT.md) and [contracts/deterministic-control-contract.json](contracts/deterministic-control-contract.json).
+
+- Evaluation records bind `spec_hash`, `suite_hash`, `policy_version`, and `engine_version`; promotion may consume only evidence matching the exact immutable spec hash and suite.
+- Determinism tests must run in separate processes with varied `PYTHONHASHSEED` and shuffled input-key order. Add the property test `normalize(normalize(x)) == normalize(x)`.
+- Compare stable `reason_code` enums rather than free-text explanations. TEST-003 must test equal-priority rules and the full `(priority ASC, specificity DESC, risk_rank ASC, rule_id ASC)` order; a different-priority test alone tests priority, not tie-breaking.
+- On suite attachment, machine-check a coverage matrix covering every required decision-table combination, operation, fallback, FSM transition, permission decision, environment, error outcome, and failure path. Missing coverage prevents attachment and promotion.
+- The example with component scores 1.00, 1.00, 1.00, 1.00, and performance 0.90 has composite 0.99 under the example weighting; do not use that composite in lieu of hard component floors.

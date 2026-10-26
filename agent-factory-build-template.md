@@ -60,13 +60,13 @@ Choose one primary framework.
 
 | Need | Framework |
 |---|---|
-| Simple explicit logic | Rule-based system |
-| Many condition combinations | Decision table |
-| Strict lifecycle | Finite-state machine |
-| Multi-step operations | Workflow engine |
-| Hard constraints | Constraint-based system |
-| Ranking/prioritization | Deterministic scoring |
-| Real-world production system | Hybrid rule + workflow |
+| Simple explicit logic | `rule_based` |
+| Many condition combinations | `decision_table` |
+| Strict lifecycle | `finite_state_machine` |
+| Multi-step operations | `workflow_engine` |
+| Hard constraints | `constraint_based` |
+| Ranking/prioritization | `deterministic_scoring` |
+| Real-world production system | `hybrid_rule_workflow` |
 
 ### Selected framework
 ```yaml
@@ -81,7 +81,7 @@ reason: "[Why this framework fits]"
 ```json
 {
   "request_id": "string",
-  "timestamp": "string",
+  "received_at": "string",
   "source": "string",
   "intent": "string",
   "payload": {},
@@ -92,7 +92,7 @@ reason: "[Why this framework fits]"
 
 ### Required fields
 - request_id
-- timestamp
+- received_at
 - source
 - intent
 - payload
@@ -172,13 +172,7 @@ policy_version: "v1.0.0"
 
 ## 9. Tie-break policy
 
-When multiple rules match, resolve in this order:
-
-1. highest rule priority
-2. most specific condition
-3. lowest risk action
-4. earliest timestamp
-5. lexical order by action ID
+Resolve using (priority ASC, specificity DESC, risk_rank ASC, rule_id ASC). Lower numeric priority wins. Equal priorities are allowed and tested. Rule IDs must be unique. Never use timestamps or action names as tie-breaks.
 
 ---
 
@@ -256,7 +250,6 @@ pass_condition: "All outputs exactly match expected_output."
 agent_id: "agent-[slug]"
 name: "[Agent name]"
 version: "v1.0.0"
-status: "sandbox|staging|production|retired"
 owner: "[Owner]"
 framework: "[Selected framework]"
 purpose: "[Purpose]"
@@ -285,7 +278,7 @@ last_reviewed_at: "[Timestamp]"
 - [ ] Determinism tests pass
 - [ ] Regression tests pass
 - [ ] Policy checks pass
-- [ ] Rollback version exists
+- [ ] A compatible, previously approved rollback target exists when replacing an active production pointer
 - [ ] Approval completed
 
 ---
@@ -297,7 +290,7 @@ Every new agent must expose:
 ```yaml
 metrics:
   - success_rate
-  - consistency_rate
+  - determinism_rate
   - failure_rate
   - escalation_rate
   - override_rate
@@ -316,3 +309,16 @@ improvement_mode: recommend_then_sandbox
 
 ## Summary
 This template turns the system into an agent factory. It lets the agentic system build new deterministic agents while preserving control, testing, permissions, and auditability.
+
+
+## 16. Normative deterministic-control contract
+
+**Normative source:** [DETERMINISTIC-CONTROL-CONTRACT.md](DETERMINISTIC-CONTROL-CONTRACT.md) and [contracts/deterministic-control-contract.json](contracts/deterministic-control-contract.json).
+
+- The framework field must use exactly one canonical enum value from the shared JSON contract; labels and aliases are not accepted at runtime.
+- Define a separate, typed input schema for each intent and set `additionalProperties: false`; a generic open-ended `payload: {}` is illustrative only and must not be used as an executable contract.
+- Runtime-agent autonomy levels are not a meaningful authority grant. Autonomy configuration applies to meta-agents only, while all external actions remain bounded by the gateway and environment policy.
+- Use `determinism_rate` as the single canonical metric name. Every metric definition must have one formula and one aggregation window.
+
+
+Registry lifecycle events and `env_pointers(agent_id, environment, version_id)` are separate records; do not add mutable `status` or singleton `current_version` fields to the agent record.

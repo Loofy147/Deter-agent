@@ -34,7 +34,6 @@ policy_id: policy-support-router-v1
 agent_id: support-router-agent
 version: v1.0.0
 environment: production
-max_autonomy_level: 3
 allowed_reads:
   - support_request_queue
   - customer_tier_table
@@ -141,9 +140,7 @@ Every tool request must include:
   "environment": "sandbox|staging|production",
   "tool_name": "string",
   "action": "string",
-  "target_resource": "string",
-  "data_class": "string",
-  "risk_level": "low|medium|high|critical"
+  "target_resource": "string"
 }
 ```
 
@@ -179,8 +176,8 @@ The following should always require approval:
 Agents cannot expand their own permissions.
 
 ```text
-If requested_permission not in current_policy.allowed_permissions:
-    decision = require_approval
+If requested_runtime_permission not in current_policy.allowed_permissions:
+    decision = deny_and_log_and_increment_unauthorized_tool_attempt_count
 ```
 
 A permission expansion must create:
@@ -216,7 +213,6 @@ blocked_tools:
 approval_required_for:
   - staging_promotion
   - permission_expansion
-max_autonomy_level: 3
 ```
 
 ### 9.2 Evaluation Agent policy
@@ -239,7 +235,6 @@ blocked_tools:
   - production_deploy
   - external_message_send
 approval_required_for: []
-max_autonomy_level: 3
 ```
 
 ### 9.3 Runtime Agent policy
@@ -261,7 +256,6 @@ blocked_tools:
 approval_required_for:
   - external_message_send
   - permission_expansion
-max_autonomy_level: 2
 ```
 
 ---
@@ -314,3 +308,17 @@ The system must block:
 
 ## Summary
 The Permission Policy Specification creates the enforcement layer for agentic control. It lets agents build and improve safely while preventing unauthorized tool use, production changes, data access, and permission escalation.
+
+
+## 13. Normative deterministic-control contract
+
+**Normative source:** [DETERMINISTIC-CONTROL-CONTRACT.md](DETERMINISTIC-CONTROL-CONTRACT.md) and [contracts/deterministic-control-contract.json](contracts/deterministic-control-contract.json).
+
+- Default deny is literal for runtime calls: an unlisted tool, action, resource, or permission is denied, logged, and counted. Do not create approval requests for routine unauthorized calls; this would create an approval-channel denial-of-service path.
+- Approval is reserved for explicit out-of-band permission-expansion proposals. Such a proposal must carry a policy diff, immutable spec hash, requester, risk evidence, and intended scope; an independent approver must approve it.
+- The gateway derives `data_class` and `risk_level` from a versioned resource/tool catalog. These values are not accepted as authoritative caller inputs.
+- `sandbox_only` rejects execution outside sandbox. `mock_only` must select a mock adapter and must never fall through to a live adapter. Missing environment-specific policy means deny.
+- Canonical policy-decision values are `allow`, `deny`, `require_approval`, `sandbox_only`, and `mock_only`. Permission scope is evaluated against the exact registered version and target resource.
+
+
+Autonomy levels are meta-agent orchestration settings only, not permission-policy fields. They do not grant runtime agents tools or bypass resource/tool authorization. Runtime authority comes exclusively from the versioned environment policy and the Permission Gateway.

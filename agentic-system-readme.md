@@ -122,19 +122,24 @@ Use this to bootstrap the platform.
 
 ---
 
-## Recommended next step
+## Normative contract and implementation order
 
-Implement in this order:
+The authoritative rules are [DETERMINISTIC-CONTROL-CONTRACT.md](DETERMINISTIC-CONTROL-CONTRACT.md) and [contracts/deterministic-control-contract.json](contracts/deterministic-control-contract.json). Examples are subordinate to those files. Run `python scripts/validate_contract.py` for the contract's static checks.
+
+Implement in dependency order:
 
 ```text
-1. Build Agent Registry from agent-registry-schema.md
-2. Build Runtime Engine from runtime-engine-spec.md
-3. Build Evaluation Harness from evaluation-harness-spec.md
-4. Add Permission Gateway from permission-policy-spec.md
-5. Add Deployment Pipeline from deployment-pipeline-spec.md
-6. Bootstrap Agent Registry Manager + Evaluation Agent from first-agent-example.md
-7. Use Agent Factory to build the first domain runtime agent
+1. canonicalization + shared enums
+2. registry with static checks
+3. permission gateway deny-all stub
+4. runtime
+5. evaluation harness
+6. deployment gate
+7. operator-signed bootstrap seed
+8. first agents
 ```
+
+The bootstrap seed is operator-signed, hash-pinned and sandbox-only; its temporary trust exception expires after step 8.
 
 Suggested first domain runtime agent after the platform is bootstrapped:
 
@@ -143,3 +148,25 @@ Support Request Router Agent
 ```
 
 Why: it is concrete, measurable, and easy to evaluate with deterministic routing rules.
+
+
+## Executable implementation
+
+The `deter_agent/` package provides the reference implementation for canonical serialization, schema validation, rule matching/shadow analysis, SQLite registry, policy gateway, runtime, evaluation, promotion/rollback, and mutation campaigns. CI exercises normalization, decision ordering, state CAS, approval resumption, retries/idempotency, stage order, rollback and mutation killing.
+
+Run from repository root:
+
+```text
+python -m unittest discover -s tests -v
+python scripts/generate_enums.py --check
+python scripts/validate_contract.py
+```
+
+This is an executable reference core, not a production integration. External adapters, secret management, cancellation guarantees and operational telemetry still require deployment-specific implementation.
+
+## Canonical source rules
+
+- Shared enums are sourced from `contracts/deterministic-control-contract.json`.
+- The contract validator runs in GitHub Actions for pushes to `main` and pull requests.
+- `agentic-system-manifest.yaml` is the only manifest file. The duplicated upload-name copies are removed.
+- Promotion binds an immutable spec hash, an evaluation run, an independent unexpired approval, and a policy diff; no record may be substituted after evaluation.

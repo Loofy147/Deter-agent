@@ -33,9 +33,7 @@ agent_id: string
 name: string
 purpose: string
 owner: string
-status: draft|sandbox|staging|production|retired
-current_version: string
-framework: rule_based|decision_table|state_machine|workflow|constraint_based|scoring|hybrid
+framework: rule_based|decision_table|finite_state_machine|workflow_engine|constraint_based|deterministic_scoring|hybrid_rule_workflow
 risk_level: low|medium|high|critical
 created_at: timestamp
 updated_at: timestamp
@@ -46,12 +44,11 @@ Every version must have:
 ```yaml
 agent_id: string
 version: string
-policy_version: string
 input_schema_ref: string
 output_schema_ref: string
 state_model_ref: string
 decision_rules_ref: string
-permission_policy_ref: string
+policy_bindings_ref: string
 evaluation_suite_ref: string
 rollback_version: string|null
 created_by: string
@@ -71,10 +68,8 @@ change_summary: string
 | name | string | Yes | Human-readable name |
 | purpose | text | Yes | Exact role of the agent |
 | owner | string | Yes | Responsible person/team |
-| status | enum | Yes | draft/sandbox/staging/production/retired |
 | framework | enum | Yes | Primary deterministic framework |
 | risk_level | enum | Yes | low/medium/high/critical |
-| current_version | string | No | Active version pointer |
 | created_at | timestamp | Yes | Creation time |
 | updated_at | timestamp | Yes | Last modification time |
 
@@ -87,14 +82,12 @@ change_summary: string
 | version_id | string | Yes | Unique version record |
 | agent_id | string | Yes | Foreign key to `agents` |
 | version | string | Yes | Semantic version, e.g. v1.0.0 |
-| policy_version | string | Yes | Policy version used by this agent version |
 | spec_hash | string | Yes | Hash of full agent spec |
 | input_schema | json | Yes | Input contract |
 | output_schema | json | Yes | Output contract |
 | state_model | json | Yes | Allowed states and transitions |
 | decision_rules | json | Yes | Ordered deterministic logic |
 | tie_break_policy | json | Yes | Deterministic tie-breaks |
-| permission_policy_id | string | Yes | Foreign key to permissions |
 | evaluation_suite_id | string | Yes | Foreign key to test suite |
 | rollback_version | string | No | Safe rollback target |
 | created_by | string | Yes | User or builder agent |
@@ -115,7 +108,6 @@ change_summary: string
 | allowed_tools | json | Yes | Tool/action allowlist |
 | blocked_tools | json | Yes | Explicit denylist |
 | approval_required_for | json | Yes | Sensitive actions |
-| max_autonomy_level | integer | Yes | 0-5 |
 | created_at | timestamp | Yes | Creation time |
 
 ---
@@ -157,8 +149,15 @@ change_summary: string
 | agent_id | string | Yes | Target agent |
 | version | string | Yes | Version tested |
 | evaluation_suite_id | string | Yes | Suite used |
+| spec_hash | string | Yes | Immutable spec hash evaluated |
+| suite_hash | string | Yes | Exact suite hash |
+| policy_version | string | Yes | Policy used |
+| engine_version | string | Yes | Engine/evaluator version |
 | status | enum | Yes | passed/failed/error |
-| score | number | Yes | Overall score |
+| score | number | Yes | Informational composite score |
+| component_scores | json | Yes | Hard-gate components |
+| floors_met | boolean | Yes | All required component floors pass |
+| coverage_complete | boolean | Yes | Required suite coverage is complete |
 | results | json | Yes | Test-level details |
 | started_at | timestamp | Yes | Start time |
 | completed_at | timestamp | Yes | End time |
@@ -204,12 +203,20 @@ change_summary: string
 
 | Field | Type | Required | Notes |
 |---|---|---:|---|
-| approval_id | string | Yes | Unique approval |
+| approval_id | string | Yes | Unique immutable approval |
 | target_type | enum | Yes | proposal/deployment/permission_change |
 | target_id | string | Yes | ID being approved |
-| requested_by | string | Yes | Requester |
-| approver | string | Yes | Human or authorized role |
+| agent_id | string | Yes | Exact target agent |
+| version | string | Yes | Exact target version |
+| target_environment | enum | Yes | sandbox/staging/production |
+| requested_by | string | Yes | Requester identity |
+| approver | string | Yes | Independent authorized approver |
 | decision | enum | Yes | approved/rejected/expired |
+| spec_hash | string | Yes | Exact immutable spec hash |
+| eval_run_id | string | Conditional | Required for promotion approvals |
+| policy_diff_hash | string | Yes | Exact policy delta reviewed |
+| scope | json | Yes | Typed approval scope |
+| expires_at | timestamp | Yes | Expiry instant |
 | evidence | json | Yes | Test results and change summary |
 | decided_at | timestamp | Yes | Decision time |
 
@@ -243,10 +250,8 @@ CREATE TABLE agents (
   name TEXT NOT NULL,
   purpose TEXT NOT NULL,
   owner TEXT NOT NULL,
-  status TEXT NOT NULL,
   framework TEXT NOT NULL,
   risk_level TEXT NOT NULL,
-  current_version TEXT,
   created_at TIMESTAMP NOT NULL,
   updated_at TIMESTAMP NOT NULL
 );
@@ -255,14 +260,12 @@ CREATE TABLE agent_versions (
   version_id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL REFERENCES agents(agent_id),
   version TEXT NOT NULL,
-  policy_version TEXT NOT NULL,
   spec_hash TEXT NOT NULL,
   input_schema JSONB NOT NULL,
   output_schema JSONB NOT NULL,
   state_model JSONB NOT NULL,
   decision_rules JSONB NOT NULL,
   tie_break_policy JSONB NOT NULL,
-  permission_policy_id TEXT NOT NULL,
   evaluation_suite_id TEXT NOT NULL,
   rollback_version TEXT,
   created_by TEXT NOT NULL,
@@ -295,7 +298,7 @@ create_agent_version(agent_id, version_spec)
 get_agent(agent_id)
 get_agent_version(agent_id, version)
 list_agents(filter)
-update_agent_status(agent_id, status)
+record_lifecycle_event(agent_id, event)
 attach_evaluation_suite(agent_id, version, suite_id)
 record_evaluation_run(result)
 create_improvement_proposal(proposal)
@@ -347,3 +350,44 @@ Only the deployment pipeline should promote status to `staging` or `production`.
 
 ## Summary
 The Agent Registry turns the agentic system from a loose collection of agents into a controlled platform. It provides the durable records needed for control, evaluation, improvement, deployment, rollback, and audit.
+
+
+## 10. Normative deterministic-control contract
+
+**Normative source:** [DETERMINISTIC-CONTROL-CONTRACT.md](DETERMINISTIC-CONTROL-CONTRACT.md) and [contracts/deterministic-control-contract.json](contracts/deterministic-control-contract.json). They override conflicting earlier examples in this document.
+
+- Do not store `agents.status` or a single `agents.current_version`. Represent lifecycle transitions as append-only events and active selection through `env_pointers(agent_id, environment, version_id, updated_at, updated_by)`.
+- Do not attach one policy directly to an agent version. Use `version_policies(version_id, environment, policy_id, policy_version, policy_hash)`, with a unique key on `(version_id, environment)`.
+- Every `evaluation_runs` row records `spec_hash`, `suite_hash`, `policy_version`, and `engine_version`. An evaluation is eligible only when its `spec_hash` equals the exact immutable version spec hash.
+- Every `approval_events` row records `spec_hash`, `eval_run_id`, `expires_at`, `policy_diff_hash`, and a typed approval `scope`. Enforce `decision = 'approved'`, non-expiry, target equality, and `approver <> requested_by` at promotion time.
+- Add append-only `traces` and `promotion_records`; `evaluation_runs`, `approval_events`, `traces`, and `promotion_records` must reject UPDATE and DELETE at the database boundary.
+- Enforce suite-author/target-author separation of duties. Validate enum consistency, rule shadowing, decision-table totality and overlap, operation coverage, fallback rules, FSM reachability, and append-only guarantees before accepting a registered version.
+- `rollback_version` may be null for draft/non-production versions and the first production release. If an environment already has a production pointer, a promotion requires a compatible rollback target that is a previously approved version.
+- No runtime agent may set meta-agent autonomy configuration; `max_autonomy_level` applies only to explicitly registered meta-agents.
+
+
+### 3.11 `env_pointers`
+
+One row per `(agent_id, environment)`; this replaces singleton `current_version`.
+
+| Field | Type | Required |
+|---|---|---:|
+| agent_id | string FK | Yes |
+| environment | enum | Yes |
+| version_id | string FK | Yes |
+| updated_at | timestamp | Yes |
+| updated_by | string | Yes |
+
+### 3.12 `version_policies`
+
+One environment-specific policy binding per immutable version.
+
+| Field | Type | Required |
+|---|---|---:|
+| version_id | string FK | Yes |
+| environment | enum | Yes |
+| policy_id | string FK | Yes |
+| policy_version | string | Yes |
+| policy_hash | string | Yes |
+
+Primary key: `(version_id, environment)`. Add a `promotion_records` table containing the exact promotion binding and binding hash. Evaluation runs, approval events, traces and promotion records are append-only and reject UPDATE/DELETE at the database boundary. Lifecycle history is event-based; the agent row has no mutable environment-independent status.

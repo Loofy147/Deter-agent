@@ -189,6 +189,8 @@ Responsibilities:
 
 ## 4. Autonomy levels
 
+These levels apply to meta-agents only. Runtime agents receive no authority from an autonomy label; the versioned Permission Gateway policy remains the sole runtime authorization mechanism.
+
 | Level | Name | Description | Production changes allowed? |
 |---:|---|---|---|
 | 0 | Manual | User designs everything | No |
@@ -248,7 +250,7 @@ version: 1.0.0
 period: weekly
 metrics:
   success_rate: 0.96
-  consistency_rate: 1.00
+  determinism_rate: 1.00
   escalation_rate: 0.07
   override_rate: 0.03
   average_latency_ms: 850
@@ -324,3 +326,10 @@ Avoid:
 
 ## Summary
 This framework gives the agentic system a safe improvement engine. It can observe, diagnose, propose, test, and build — but production behavior changes only through controlled gates, evaluation, versioning, and approval.
+
+
+## 11. Normative deterministic-control contract
+
+**Normative source:** [DETERMINISTIC-CONTROL-CONTRACT.md](DETERMINISTIC-CONTROL-CONTRACT.md) and [contracts/deterministic-control-contract.json](contracts/deterministic-control-contract.json).
+
+Autonomy levels configure meta-agents only. They do not grant runtime agents a path around resource/tool policy, approval binding, evaluation floors, or stage order. The canonical metric is `determinism_rate`; define a single formula and aggregation window in the metrics dictionary rather than introducing aliases.

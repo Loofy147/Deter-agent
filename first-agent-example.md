@@ -25,7 +25,6 @@ name: Agent Registry Manager Agent
 version: v1.0.0
 framework: hybrid_rule_workflow
 risk_level: medium
-status: sandbox
 owner: system_operator
 ```
 
@@ -67,7 +66,7 @@ This agent does **not** deploy production agents. It creates or updates registry
   "agent_id": "string",
   "payload": {},
   "requested_by": "string",
-  "environment": "draft|sandbox|staging|production"
+  "environment": "sandbox|staging|production"
 }
 ```
 
@@ -161,8 +160,8 @@ rules:
     name: Block historical production mutation
     condition: operation attempts to modify an existing production version
     action: reject
-    priority: 40
-    reason: Production versions are immutable.
+    priority: 5
+    reason: Production versions are immutable; this deny guard outranks the generic create-version allow.
 
   - rule_id: REG-007
     name: Attach evaluation suite
@@ -177,18 +176,41 @@ rules:
     action: write_evaluation_run
     priority: 60
     reason: Evaluation evidence must be stored.
+
+  - rule_id: REG-009
+    name: Record improvement proposal
+    condition: operation = record_proposal and proposal schema and evidence references are valid
+    action: create_improvement_proposal
+    priority: 70
+    reason: Proposals must be typed and evidence-linked.
+
+  - rule_id: REG-010
+    name: Update non-production lifecycle
+    condition: operation = update_status and payload.status in [draft, sandbox] and environment != production
+    action: update_lifecycle_event
+    priority: 80
+    reason: Non-production lifecycle updates are explicit and auditable.
+
+  - rule_id: REG-011
+    name: Reject production-environment registry writes
+    condition: environment = production and operation mutates registry records
+    action: reject
+    priority: 3
+    reason: Registry Manager cannot mutate records from production context.
+
+  - rule_id: REG-999
+    name: Explicit fallback
+    condition: no previous rule matches
+    action: reject
+    priority: 999
+    reason: No unmatched operation may be implicitly allowed.
 ```
 
 ---
 
 ## 8. Tie-break policy
 
-If multiple rules match:
-
-1. lowest priority number for validation/rejection rules
-2. highest safety rule priority
-3. most specific operation match
-4. lexical order by rule ID
+Use the single total order (priority ASC, specificity DESC, risk_rank ASC, rule_id ASC). Lower numeric priority wins. Equal-priority ties are valid and tested; timestamps and action names never break ties. Rule IDs must be unique.
 
 ---
 
@@ -198,7 +220,6 @@ If multiple rules match:
 policy_id: registry-manager-sandbox-v1
 agent_id: agent-registry-manager
 environment: sandbox
-max_autonomy_level: 3
 allowed_reads:
   - agent_registry
   - evaluation_suites
@@ -407,29 +428,58 @@ completed
 ```yaml
 rules:
   - rule_id: EVAL-001
+    priority: 1
     condition: evaluation suite missing
     action: reject
     reason: Evaluation cannot run without a suite.
 
   - rule_id: EVAL-002
+    priority: 2
     condition: target agent version missing
     action: reject
     reason: Evaluation requires a registered agent version.
 
   - rule_id: EVAL-003
+    priority: 3
     condition: environment = production
     action: reject
     reason: Evaluation Agent runs only in sandbox or staging.
 
   - rule_id: EVAL-004
+    priority: 10
     condition: all tests pass and thresholds met
     action: mark_passed
     reason: Evaluation passed.
 
   - rule_id: EVAL-005
+    priority: 20
     condition: one or more required tests fail
     action: mark_failed
     reason: Evaluation failed.
+
+  - rule_id: EVAL-006
+    priority: 21
+    condition: tests pass but one or more component floors fail
+    action: mark_failed
+    reason: Composite score cannot mask component-floor failures.
+
+  - rule_id: EVAL-007
+    priority: 4
+    condition: evaluation runner or dependency returns an error
+    action: mark_error
+    reason: Error is never a passing evaluation.
+
+  - rule_id: EVAL-008
+    priority: 5
+    condition: no environment-specific policy exists for the requested target
+    action: reject
+    reason: Missing environment policy defaults to deny.
+
+  - rule_id: EVAL-999
+    priority: 999
+    condition: no previous rule matches
+    action: reject
+    reason: No unmatched evaluation request may be implicitly allowed.
 ```
 
 ---
@@ -440,7 +490,6 @@ rules:
 policy_id: evaluation-agent-sandbox-v1
 agent_id: evaluation-agent
 environment: sandbox
-max_autonomy_level: 3
 allowed_reads:
   - agent_registry
   - agent_versions
@@ -462,6 +511,36 @@ approval_required_for: []
 ```
 
 ---
+
+
+### Evaluation Agent staging policy
+
+Register a distinct policy before allowing `environment: staging`. A missing environment-specific policy denies by default.
+
+```yaml
+policy_id: evaluation-agent-staging-v1
+agent_id: evaluation-agent
+environment: staging
+allowed_reads:
+  - agent_registry
+  - agent_versions
+  - evaluation_suites
+  - staging_runtime_results
+allowed_writes:
+  - evaluation_runs
+  - evaluation_reports
+allowed_tools:
+  - run_staging_test
+  - compare_outputs
+  - calculate_score
+  - write_evaluation_report
+blocked_tools:
+  - production_deploy
+  - change_agent_rules
+  - change_permissions
+  - external_message_send
+approval_required_for: []
+```
 
 ## 9. Example evaluation request
 
@@ -486,7 +565,7 @@ approval_required_for: []
   "evaluation_run_id": "EVAL-001",
   "target_agent_id": "support-router-agent",
   "target_version": "v1.0.0",
-  "overall_score": 0.98,
+  "overall_score": 0.99,
   "failed_tests": [],
   "report_ref": "evaluation_reports/EVAL-001.json",
   "trace_id": "TRACE-EVAL-001"
@@ -497,22 +576,27 @@ approval_required_for: []
 
 # Part 3: First build sequence
 
-Use this order to bring the system online:
+Use an operator-signed, hash-pinned bootstrap seed with `created_by: bootstrap`. The exception is sandbox-only and expires after step 8.
 
 ```text
-1. Create registry schema.
-2. Register Agent Registry Manager Agent as draft.
-3. Create its sandbox permission policy.
-4. Create its evaluation suite.
-5. Run Evaluation Agent manually or through sandbox runtime.
-6. Register Evaluation Agent as draft.
-7. Create Evaluation Agent evaluation suite.
-8. Run both agents in sandbox.
-9. Use them to register the first runtime agent.
-10. Deploy only after review and approval pipeline exists.
+1. Canonicalization + shared enums from contracts/deterministic-control-contract.json.
+2. Registry with static validation and append-only audit protections.
+3. Permission Gateway deny-all stub.
+4. Seed Registry Manager with an operator-signed bootstrap record.
+5. Hash-pin the Evaluation Agent spec and suite; execute it only in sandbox.
+6. Register sandbox and staging policies before allowing evaluation in each respective environment; staging policy is test-only and denies production actions.
+7. Test operation coverage, fallback, rule shadowing, equal-priority tie-breaks, approval bindings, threshold failures and error paths.
+8. Validate bootstrap signature/hash, record expiry, and revoke the temporary trust-root exception.
+9. Register and evaluate the first domain agent in sandbox.
+10. Promote only through ordered stages, component floors, independent approval and rollback gates.
 ```
 
----
+Registry Manager rules cover every operation plus an explicit fallback. The production-mutation guard outranks generic create-version allow. The Evaluation Agent explicitly handles missing suite/version, missing environment policy, tests-pass/threshold-fail, `error`, and unmatched requests.
 
 ## Summary
 The first useful system agents are the Agent Registry Manager and Evaluation Agent. They establish the control loop required before building many other agents: every agent must be registered, versioned, tested, scored, and governed before deployment.
+
+
+## 13. Normative deterministic-control contract
+
+**Normative source:** [DETERMINISTIC-CONTROL-CONTRACT.md](DETERMINISTIC-CONTROL-CONTRACT.md) and [contracts/deterministic-control-contract.json](contracts/deterministic-control-contract.json). Corrected rules in Part 3 supersede earlier illustrative rule tables and build order.
