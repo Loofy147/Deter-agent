@@ -7,7 +7,7 @@ import time
 import unittest
 
 from deter_agent.gateway import PermissionGateway
-from deter_agent.registry import Registry
+from deter_agent.registry import Registry, RegistryConflict
 from deter_agent.runtime import RuntimeEngine
 from tests.helpers import make_policy, make_spec, make_tool_catalog, register_version_everywhere
 
@@ -103,6 +103,39 @@ class RuntimeStressTests(unittest.TestCase):
         self.assertEqual(trace_statuses.count("rejected"), 1)
         self.assertEqual(trace_statuses.count("failed"), 0, "resume trace must match the returned rejection")
         self.assertGreaterEqual(runtime.metrics["rejected"], 1)
+
+    def test_policy_cannot_be_rebound_while_approval_is_pending(self):
+        def send(action_input, idempotency_key=None):
+            return {"ok": True, "message_id": "M-POLICY-IMMUTABLE"}
+
+        runtime = RuntimeEngine(self.registry, self.gateway, {"send_message": send})
+        pending = runtime.run(self.job("pending-policy-rebind", "protected", "production"))
+        self.assertEqual(pending["status"], "approval_pending")
+        frozen = self.registry.get_frozen_decision(pending["decision_id"])
+        original = self.registry.get_version_policy("agent-a", "v1.0.0", "production")
+
+        replacement = make_policy(
+            "production", tools=["create_ticket"], approvals=[], policy_id="replacement-policy"
+        )
+        self.registry.register_policy("replacement-policy", "v2", "production", replacement)
+        with self.assertRaises(RegistryConflict):
+            self.registry.bind_policy(
+                "agent-a", "v1.0.0", "production", "replacement-policy", "v2"
+            )
+        current = self.registry.get_version_policy("agent-a", "v1.0.0", "production")
+        self.assertEqual(current["policy_hash"], frozen["decision"]["policy_hash"])
+        self.assertEqual(current["policy_hash"], original["policy_hash"])
+
+        approval = self.registry.record_approval(
+            target_type="runtime_action", target_id=pending["decision_id"], agent_id="agent-a",
+            version="v1.0.0", target_environment="production", requested_by="requester",
+            approver="independent-reviewer", decision="approved", spec_hash=frozen["spec_hash"],
+            eval_run_id=None, expires_at=time.time()+600,
+            policy_diff_hash=pending["policy_diff_hash"], scope=pending["approval_scope"],
+        )
+        resumed = runtime.resume_approved(pending["decision_id"], approval["approval_id"])
+        self.assertEqual(resumed["status"], "completed")
+        self.assertEqual(resumed["reason_code"], "ACTION_COMPLETED")
 
     def test_trace_and_approval_evidence_are_append_only(self):
         runtime = RuntimeEngine(self.registry, self.gateway, {"create_ticket": lambda payload, idempotency_key=None: {"ok": True, "ticket_id": "T-IMMUTABLE"}})
