@@ -25,17 +25,66 @@ def policy_diff(previous: dict[str, Any] | None, candidate: dict[str, Any]) -> d
     old = previous or {}
     expansions = {}
     restrictions = {}
-    for field in ("allowed_reads", "allowed_writes", "allowed_tools", "data_classes_allowed"):
+    for field in ("allowed_reads", "allowed_writes", "allowed_tools"):
         added = sorted(_set(candidate, field) - _set(old, field))
         removed = sorted(_set(old, field) - _set(candidate, field))
         if added: expansions[field] = added
         if removed: restrictions[field] = removed
+
+    # An empty data_classes_allowed list means "no additional restriction" in the
+    # gateway, unlike the other allowlists where an empty list denies all.
+    old_classes = _set(old, "data_classes_allowed")
+    new_classes = _set(candidate, "data_classes_allowed")
+    if old_classes and new_classes:
+        added_classes = sorted(new_classes - old_classes)
+        removed_classes = sorted(old_classes - new_classes)
+        if added_classes: expansions["data_classes_allowed"] = added_classes
+        if removed_classes: restrictions["data_classes_allowed"] = removed_classes
+    elif old_classes and not new_classes:
+        expansions["data_classes_allowed"] = sorted(old_classes)
+    elif new_classes and not old_classes:
+        restrictions["data_classes_allowed"] = sorted(new_classes)
+
     old_blocked = _set(old, "blocked_tools")
     new_blocked = _set(candidate, "blocked_tools")
     unblocked = sorted(old_blocked - new_blocked)
     blocked = sorted(new_blocked - old_blocked)
     if unblocked: expansions["unblocked_tools"] = unblocked
     if blocked: restrictions["blocked_tools"] = blocked
+
+    old_blocked_classes = _set(old, "data_classes_blocked")
+    new_blocked_classes = _set(candidate, "data_classes_blocked")
+    unblocked_classes = sorted(old_blocked_classes - new_blocked_classes)
+    blocked_classes = sorted(new_blocked_classes - old_blocked_classes)
+    if unblocked_classes: expansions["unblocked_data_classes"] = unblocked_classes
+    if blocked_classes: restrictions["blocked_data_classes"] = blocked_classes
+
+    old_modes = old.get("tool_modes", {}) if isinstance(old.get("tool_modes", {}), dict) else {}
+    new_modes = candidate.get("tool_modes", {}) if isinstance(candidate.get("tool_modes", {}), dict) else {}
+    mode_rank = {"live": 0, "sandbox_only": 1, "mock_only": 2}
+    loosened_modes = {}
+    tightened_modes = {}
+    for tool_name in sorted(set(old_modes) | set(new_modes)):
+        old_mode = old_modes.get(tool_name, "live")
+        new_mode = new_modes.get(tool_name, "live")
+        old_rank = mode_rank.get(old_mode, 0)
+        new_rank = mode_rank.get(new_mode, 0)
+        if new_rank < old_rank:
+            loosened_modes[tool_name] = {"from": old_mode, "to": new_mode}
+        elif new_rank > old_rank:
+            tightened_modes[tool_name] = {"from": old_mode, "to": new_mode}
+    if loosened_modes: expansions["tool_modes"] = loosened_modes
+    if tightened_modes: restrictions["tool_modes"] = tightened_modes
+
+    old_sandbox_side_effects = old.get("sandbox_side_effects_allowed") is True
+    new_sandbox_side_effects = candidate.get("sandbox_side_effects_allowed") is True
+    if old_sandbox_side_effects != new_sandbox_side_effects:
+        change = {"from": old_sandbox_side_effects, "to": new_sandbox_side_effects}
+        if new_sandbox_side_effects:
+            expansions["sandbox_side_effects_allowed"] = change
+        else:
+            restrictions["sandbox_side_effects_allowed"] = change
+
     old_approval = _set(old, "approval_required_for")
     new_approval = _set(candidate, "approval_required_for")
     no_longer_approval = sorted(old_approval - new_approval)

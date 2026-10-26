@@ -1,9 +1,11 @@
+import threading
 import time
 import unittest
 
 from deter_agent.evaluation import EvaluationHarness
 from deter_agent.promotion import PromotionDenied, PromotionGate, policy_diff
-from deter_agent.registry import Registry
+from deter_agent.canonical import sha256_json
+from deter_agent.registry import Registry, RegistryConflict
 from tests.helpers import make_policy, make_spec
 
 
@@ -42,6 +44,40 @@ def approve(registry, version_row, eval_run_id, environment, policy, *, target_t
         spec_hash=version_row["spec_hash"], eval_run_id=eval_run_id, expires_at=time.time()+600,
         policy_diff_hash=diff_hash, scope=scope or ["permission_change"],
     )
+
+
+class PolicyDiffAdversarialTests(unittest.TestCase):
+    def test_unblocking_data_classes_is_a_permission_expansion(self):
+        previous = make_policy("production", policy_id="policy-old")
+        candidate = dict(previous)
+        candidate["data_classes_blocked"] = ["secrets"]
+        diff = policy_diff(previous, candidate)
+        self.assertEqual(diff["expansions"]["unblocked_data_classes"], ["payment_full"])
+        self.assertTrue(diff["expansions"])
+
+    def test_sandbox_side_effect_enablement_and_tool_mode_loosening_expand(self):
+        previous = make_policy("sandbox", policy_id="policy-old", sandbox_side_effects=False)
+        previous["tool_modes"] = {"create_ticket": "mock_only", "send_message": "sandbox_only"}
+        candidate = dict(previous)
+        candidate["sandbox_side_effects_allowed"] = True
+        candidate["tool_modes"] = {"create_ticket": "sandbox_only", "send_message": "live"}
+        diff = policy_diff(previous, candidate)
+        self.assertTrue(diff["expansions"]["sandbox_side_effects_allowed"]["to"])
+        self.assertIn("create_ticket", diff["expansions"]["tool_modes"])
+        self.assertIn("send_message", diff["expansions"]["tool_modes"])
+        self.assertTrue(diff["restrictions"]["tool_modes"].get("send_message") is None)
+
+    def test_empty_data_class_allowlist_is_unrestricted(self):
+        unrestricted = make_policy("production", policy_id="policy-unrestricted")
+        unrestricted["data_classes_allowed"] = []
+        restricted = dict(unrestricted)
+        restricted["data_classes_allowed"] = ["internal"]
+        restrict_diff = policy_diff(unrestricted, restricted)
+        self.assertEqual(restrict_diff["restrictions"]["data_classes_allowed"], ["internal"])
+        self.assertNotIn("data_classes_allowed", restrict_diff["expansions"])
+        loosen_diff = policy_diff(restricted, unrestricted)
+        self.assertEqual(loosen_diff["expansions"]["data_classes_allowed"], ["internal"])
+        self.assertNotIn("data_classes_allowed", loosen_diff["restrictions"])
 
 
 class EvaluationTests(unittest.TestCase):
@@ -123,6 +159,67 @@ class PromotionTests(unittest.TestCase):
         self.assertEqual(production["binding"]["spec_hash"], self.v1["spec_hash"])
         pointer = self.registry.environment_pointer("agent-a", "production")
         self.assertEqual(pointer["version"], "v1.0.0")
+
+    def test_expired_exact_stage_approval_is_denied(self):
+        self.gate.promote("agent-a", "v1.0.0", "sandbox", requested_by="operator")
+        policy = self.registry.get_version_policy("agent-a", "v1.0.0", "staging")["policy"]
+        diff_hash = sha256_json(policy_diff(None, policy))
+        self.registry.record_approval(
+            target_type="promotion", target_id="agent-a:v1.0.0", agent_id="agent-a",
+            version="v1.0.0", target_environment="staging", requested_by="release-requester",
+            approver="independent-approver", decision="approved", spec_hash=self.v1["spec_hash"],
+            eval_run_id="eval-v1.0.0", expires_at=self.gate.clock() - 1,
+            policy_diff_hash=diff_hash, scope=["permission_change"],
+        )
+        with self.assertRaises(PromotionDenied) as context:
+            self.gate.promote("agent-a", "v1.0.0", "staging", requested_by="operator")
+        self.assertEqual(context.exception.reason_code, "APPROVAL_REQUIRED")
+        self.assertIsNone(self.registry.environment_pointer("agent-a", "staging"))
+
+    def test_concurrent_environment_pointer_cas_allows_only_one_writer(self):
+        second, _ = register_version(self.registry, "v2.0.0", created_by="builder-two")
+        barrier = threading.Barrier(3)
+        outcomes = []
+        outcome_lock = threading.Lock()
+
+        def commit(version_row, run_id, promotion_id):
+            binding = {
+                "agent_id": "agent-a", "version": version_row["version"],
+                "target_environment": "sandbox", "spec_hash": version_row["spec_hash"],
+                "eval_run_id": run_id, "approval_event_id": None,
+                "policy_diff_hash": "d" * 64,
+            }
+            barrier.wait()
+            try:
+                self.registry.commit_promotion(
+                    binding=binding, binding_hash=sha256_json(binding), promotion_id=promotion_id,
+                    deployed_by="operator", expected_previous_version_id=None,
+                )
+                result = "committed"
+            except RegistryConflict:
+                result = "conflict"
+            with outcome_lock:
+                outcomes.append(result)
+
+        threads = [
+            threading.Thread(target=commit, args=(self.v1, "eval-v1.0.0", "concurrent-promo-one")),
+            threading.Thread(target=commit, args=(second, "eval-v2.0.0", "concurrent-promo-two")),
+        ]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(timeout=5)
+        self.assertTrue(all(not thread.is_alive() for thread in threads), "promotion CAS worker hung")
+        self.assertCountEqual(outcomes, ["committed", "conflict"])
+        pointer = self.registry.environment_pointer("agent-a", "sandbox")
+        self.assertIn(pointer["version"], {"v1.0.0", "v2.0.0"})
+        self.assertEqual(
+            self.registry._connection.execute(
+                "SELECT COUNT(*) FROM promotion_records WHERE target_environment='sandbox'"
+            ).fetchone()[0],
+            1,
+        )
 
     def test_stage_skip_denied(self):
         with self.assertRaises(PromotionDenied) as context:
