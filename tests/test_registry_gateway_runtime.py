@@ -54,6 +54,108 @@ class RegistryTests(unittest.TestCase):
                 policy_diff_hash="d"*64, scope=["permission_change"],
             )
 
+    def test_claim_state_rejects_invalid_lease_and_version_inputs(self):
+        for lease in (0, -1, float("nan"), float("inf"), True):
+            with self.subTest(lease=lease):
+                with self.assertRaises(RegistryError):
+                    self.registry.claim_state("agent-a", "bad-lease", 0, "token", lease_seconds=lease)
+        for version in (-1, True, 1.5):
+            with self.subTest(version=version):
+                with self.assertRaises(RegistryError):
+                    self.registry.claim_state("agent-a", "bad-version", version, "token")
+        with self.assertRaises(RegistryError):
+            self.registry.claim_state("agent-a", "empty-token", 0, "")
+
+    def test_all_evidence_tables_enforce_append_only_updates_and_deletes(self):
+        suite = self.registry.record_evaluation_suite(
+            "suite-append-only", "agent-a", "v1.0.0",
+            {"tests": [{"test_id": "T-1", "test_type": "regression"}]},
+            created_by="independent-qa",
+        )
+        self.registry.record_evaluation(
+            run_id="eval-append-only", agent_id="agent-a", version="v1.0.0",
+            spec_hash=self.version["spec_hash"], suite_id=suite["suite_id"],
+            policy_version="v1", engine_version="test-engine", status="passed",
+            floors_met=True, coverage_complete=True, component_scores={"regression": 1.0},
+            score=1.0, results=[{"test_id": "T-1", "passed": True}], created_by="independent-qa",
+            started_at=100.0, completed_at=101.0,
+        )
+        self.registry.record_approval(
+            approval_id="approval-append-only", target_type="promotion",
+            target_id="agent-a:v1.0.0", agent_id="agent-a", version="v1.0.0",
+            target_environment="staging", requested_by="release-requester",
+            approver="independent-approver", decision="approved",
+            spec_hash=self.version["spec_hash"], eval_run_id="eval-append-only",
+            expires_at=time.time() + 600, policy_diff_hash="d" * 64, scope=["permission_change"],
+        )
+        self.registry.commit_promotion(
+            binding={
+                "agent_id": "agent-a", "version": "v1.0.0", "target_environment": "staging",
+                "spec_hash": self.version["spec_hash"], "eval_run_id": "eval-append-only",
+                "approval_event_id": "approval-append-only", "policy_diff_hash": "d" * 64,
+            },
+            binding_hash="b" * 64, promotion_id="promotion-append-only",
+            deployed_by="release-operator", expected_previous_version_id=None,
+        )
+        self.registry.record_trace(
+            trace_id="trace-append-only", request_id="evidence-request", agent_id="agent-a",
+            version="v1.0.0", environment="staging", status="completed", details={"ok": True},
+        )
+        self.registry.append_frozen_decision({
+            "decision_id": "frozen-append-only", "request_id": "frozen-request",
+            "agent_id": "agent-a", "version": "v1.0.0", "environment": "staging",
+            "spec_hash": self.version["spec_hash"], "policy_version": "v1",
+            "state_version": 0, "reference_data_version": "refs-v1",
+            "policy_diff_hash": "d" * 64, "idempotency_key": "idempotency-frozen",
+            "decision": {"tool_name": "create_ticket"},
+        })
+        tables = [
+            ("versions", "version_id='agent-a:v1.0.0'", "created_at"),
+            ("policies", "policy_id='test-policy' AND policy_version='v1' AND environment='staging'", "created_at"),
+            ("evaluation_suites", "suite_id='suite-append-only'", "created_at"),
+            ("evaluation_runs", "run_id='eval-append-only'", "completed_at"),
+            ("approval_events", "approval_id='approval-append-only'", "created_at"),
+            ("promotion_records", "promotion_id='promotion-append-only'", "created_at"),
+            ("traces", "trace_id='trace-append-only'", "created_at"),
+            ("frozen_decisions", "decision_id='frozen-append-only'", "created_at"),
+        ]
+        for table, predicate, mutable_column in tables:
+            with self.subTest(table=table, operation="UPDATE"):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    self.registry._connection.execute(
+                        f"UPDATE {table} SET {mutable_column}={mutable_column} WHERE {predicate}"
+                    )
+            with self.subTest(table=table, operation="DELETE"):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    self.registry._connection.execute(f"DELETE FROM {table} WHERE {predicate}")
+
+    def test_promotion_transaction_rolls_back_on_duplicate_record(self):
+        binding = {
+            "agent_id": "agent-a", "version": "v1.0.0", "target_environment": "staging",
+            "spec_hash": self.version["spec_hash"], "eval_run_id": "eval-v1",
+            "policy_diff_hash": "d" * 64,
+        }
+        self.registry.commit_promotion(
+            binding=binding, binding_hash="b" * 64, promotion_id="promotion-unique",
+            deployed_by="operator", expected_previous_version_id=None,
+        )
+        count_before = self.registry._connection.execute(
+            "SELECT COUNT(*) FROM promotion_records"
+        ).fetchone()[0]
+        conflicting = dict(binding, version="v9.9.9", spec_hash="x" * 64)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.registry.commit_promotion(
+                binding=conflicting, binding_hash="c" * 64, promotion_id="promotion-unique",
+                deployed_by="operator", expected_previous_version_id="agent-a:v1.0.0",
+            )
+        count_after = self.registry._connection.execute(
+            "SELECT COUNT(*) FROM promotion_records"
+        ).fetchone()[0]
+        self.assertEqual(count_after, count_before)
+        self.assertEqual(
+            self.registry.environment_pointer("agent-a", "staging")["version"], "v1.0.0"
+        )
+
     def test_claim_cas_prevents_concurrent_claims(self):
         barrier = threading.Barrier(3)
         result = []

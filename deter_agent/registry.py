@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import threading
 import time
@@ -649,6 +650,17 @@ class Registry:
         return self._json(row["state_json"]), int(row["state_version"])
 
     def claim_state(self, agent_id: str, request_id: str, state_version: int, claim_token: str, *, lease_seconds: float = 60.0, now: float | None = None) -> bool:
+        if not agent_id or not request_id or not claim_token:
+            raise RegistryError("agent_id, request_id and claim_token are required")
+        if isinstance(state_version, bool) or not isinstance(state_version, int) or state_version < 0:
+            raise RegistryError("state_version must be a non-negative integer")
+        if (
+            isinstance(lease_seconds, bool)
+            or not isinstance(lease_seconds, (int, float))
+            or not math.isfinite(lease_seconds)
+            or lease_seconds <= 0
+        ):
+            raise RegistryError("lease_seconds must be a finite positive number")
         current = now if now is not None else time.time()
         with self._transaction() as conn:
             state = conn.execute(
