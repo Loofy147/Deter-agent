@@ -469,7 +469,7 @@ class Registry:
             if not isinstance(case, dict):
                 raise RegistryError("each evaluation test must be an object")
             test_type = case.get("test_type")
-            if test_type not in supported_types:
+            if not isinstance(test_type, str) or test_type not in supported_types:
                 raise RegistryError(f"unsupported test type {test_type!r}")
             test_id = case.get("test_id", f"test-{index}")
             if not isinstance(test_id, str) or not test_id:
@@ -496,7 +496,9 @@ class Registry:
             elif test_type == "determinism":
                 raise RegistryError("determinism tests must declare repeat_count >= 2")
         required_types = normalized.get("required_test_types", list(REQUIRED_TEST_TYPES))
-        if not isinstance(required_types, list) or any(value not in supported_types for value in required_types):
+        if not isinstance(required_types, list) or any(
+            not isinstance(value, str) or value not in supported_types for value in required_types
+        ):
             raise RegistryError("required_test_types must contain supported test type names")
         thresholds = normalized.get("thresholds", {})
         threshold = thresholds.get("minimum_performance_score", 0.0)
@@ -676,19 +678,37 @@ class Registry:
         approver: str, decision: str, spec_hash: str, eval_run_id: str | None,
         expires_at: float, policy_diff_hash: str, scope: Any, now: float | None = None
     ) -> dict[str, Any]:
+        if target_type not in {"promotion", "rollback", "runtime_action"}:
+            raise RegistryError("invalid approval target_type")
         if target_environment not in ENVIRONMENTS or decision not in {"approved", "rejected", "expired"}:
             raise RegistryError("invalid approval environment or decision")
+        if not all(isinstance(value, str) and value.strip() for value in (
+            target_id, agent_id, version, requested_by, approver, spec_hash, policy_diff_hash,
+        )):
+            raise RegistryError("approval identity and binding fields must be non-empty strings")
         if not requested_by or not approver or requested_by == approver:
             raise RegistryError("approval requires an independent approver")
-        if not target_id or not spec_hash or not policy_diff_hash:
-            raise RegistryError("approval target, spec hash and policy diff hash are required")
+        if eval_run_id is not None and (not isinstance(eval_run_id, str) or not eval_run_id.strip()):
+            raise RegistryError("eval_run_id must be null or a non-empty string")
+        if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)) or not math.isfinite(expires_at):
+            raise RegistryError("approval expires_at must be a finite number")
+        created_at = now if now is not None else time.time()
+        if isinstance(created_at, bool) or not isinstance(created_at, (int, float)) or not math.isfinite(created_at):
+            raise RegistryError("approval created_at must be a finite number")
+        # Fail at the registry boundary with a stable domain error for non-JSON scope values.
+        try:
+            scope_json = canonical_json(scope)
+        except (TypeError, ValueError) as exc:
+            raise RegistryError("approval scope must be canonical JSON") from exc
         aid = approval_id or str(uuid.uuid4())
+        if not isinstance(aid, str) or not aid.strip():
+            raise RegistryError("approval_id must be a non-empty string")
         event = {
             "approval_id": aid, "target_type": target_type, "target_id": target_id, "agent_id": agent_id,
             "version": version, "target_environment": target_environment, "requested_by": requested_by,
             "approver": approver, "decision": decision, "spec_hash": spec_hash, "eval_run_id": eval_run_id,
             "expires_at": float(expires_at), "policy_diff_hash": policy_diff_hash, "scope": scope,
-            "created_at": now if now is not None else time.time(),
+            "created_at": created_at,
         }
         with self._transaction() as conn:
             conn.execute(
@@ -696,7 +716,7 @@ class Registry:
                    requested_by,approver,decision,spec_hash,eval_run_id,expires_at,policy_diff_hash,scope_json,created_at)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (aid,target_type,target_id,agent_id,version,target_environment,requested_by,approver,decision,spec_hash,
-                 eval_run_id,float(expires_at),policy_diff_hash,canonical_json(scope),event["created_at"]),
+                 eval_run_id,float(expires_at),policy_diff_hash,scope_json,event["created_at"]),
             )
         return event
 

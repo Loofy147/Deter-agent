@@ -55,6 +55,33 @@ class RegistryTests(unittest.TestCase):
                 policy_diff_hash="d"*64, scope=["permission_change"],
             )
 
+    def test_evaluation_suite_rejects_unhashable_type_names_deterministically(self):
+        bad_suites = [
+            {"tests":[{"test_id":"BAD","test_type":[]} ]},
+            {"tests":[{"test_id":"GOOD","test_type":"regression"}],"required_test_types":[[]]},
+        ]
+        for index, suite in enumerate(bad_suites):
+            with self.subTest(index=index):
+                with self.assertRaises(RegistryError):
+                    self.registry.record_evaluation_suite(
+                        f"suite-bad-type-{index}", "agent-a", "v1.0.0", suite,
+                        created_by="independent-qa",
+                    )
+
+    def test_approval_rejects_unknown_target_type_and_nonfinite_expiry(self):
+        common = {
+            "target_id":"agent-a:v1.0.0","agent_id":"agent-a","version":"v1.0.0",
+            "target_environment":"staging","requested_by":"requester","approver":"reviewer",
+            "decision":"approved","spec_hash":self.version["spec_hash"],"eval_run_id":"eval-v1",
+            "policy_diff_hash":"d"*64,"scope":["permission_change"],
+        }
+        with self.assertRaises(RegistryError):
+            self.registry.record_approval(**common,target_type="generic",expires_at=time.time()+60)
+        for expiry in (float("nan"),float("inf"),-float("inf"),True):
+            with self.subTest(expiry=expiry):
+                with self.assertRaises(RegistryError):
+                    self.registry.record_approval(**common,target_type="promotion",expires_at=expiry)
+
     def test_claim_state_rejects_invalid_lease_and_version_inputs(self):
         for lease in (0, -1, float("nan"), float("inf"), True):
             with self.subTest(lease=lease):
