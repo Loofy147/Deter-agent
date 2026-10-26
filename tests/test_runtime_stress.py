@@ -129,5 +129,53 @@ class RuntimeStressTests(unittest.TestCase):
             )
 
 
+    def test_approval_resume_is_single_claim_even_after_state_lease_expiry(self):
+        entered = threading.Event()
+        release = threading.Event()
+        calls = []
+        calls_lock = threading.Lock()
+
+        def send(action_input, idempotency_key=None):
+            with calls_lock:
+                calls.append(idempotency_key)
+            entered.set()
+            if not release.wait(timeout=3):
+                raise TimeoutError("test release timed out")
+            return {"ok": True, "message_id": "M-ONE-RESUME"}
+
+        runtime = RuntimeEngine(
+            self.registry, self.gateway, {"send_message": send}, claim_lease_seconds=0.05
+        )
+        pending = runtime.run(self.job("resume-lease-race", "protected", "production"))
+        self.assertEqual(pending["status"], "approval_pending")
+        frozen = self.registry.get_frozen_decision(pending["decision_id"])
+        approval = self.registry.record_approval(
+            target_type="runtime_action", target_id=pending["decision_id"], agent_id="agent-a",
+            version="v1.0.0", target_environment="production", requested_by="requester",
+            approver="independent-reviewer", decision="approved", spec_hash=frozen["spec_hash"],
+            eval_run_id=None, expires_at=time.time()+600,
+            policy_diff_hash=pending["policy_diff_hash"], scope=pending["approval_scope"],
+        )
+
+        first_result = []
+        first = threading.Thread(
+            target=lambda: first_result.append(runtime.resume_approved(pending["decision_id"], approval["approval_id"]))
+        )
+        first.start()
+        self.assertTrue(entered.wait(timeout=2), "first resume never reached the action handler")
+        time.sleep(0.08)  # ensure the SQLite state lease is expired while the first effect is pending
+
+        second = runtime.resume_approved(pending["decision_id"], approval["approval_id"])
+        release.set()
+        first.join(timeout=5)
+        self.assertFalse(first.is_alive(), "first resume worker hung")
+        self.assertEqual(len(calls), 1, "expired state lease allowed a second external effect")
+        self.assertEqual(second["reason_code"], "DUPLICATE_RESUME_IN_PROGRESS")
+        self.assertEqual(len(first_result), 1)
+        self.assertEqual(first_result[0]["status"], "escalated")
+        cached = self.registry.lookup_request_result("agent-a", "v1.0.0", self.registry.get_version("agent-a", "v1.0.0")["spec_hash"], "resume-lease-race")
+        self.assertEqual(cached["status"], "escalated")
+
+
 if __name__ == "__main__":
     unittest.main()

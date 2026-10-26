@@ -414,8 +414,26 @@ class RuntimeEngine:
         result = None
         token = None
         claim_active = False
+        resume_claimed = False
+        idempotency_key = None
         try:
             frozen = self.registry.get_frozen_decision(decision_id)
+            idempotency_key = frozen["idempotency_key"]
+            request_row = self.registry.lookup_request_result(
+                frozen["agent_id"], frozen["version"], frozen["spec_hash"], frozen["request_id"]
+            )
+            if not request_row:
+                result = self._result("rejected", "IDEMPOTENCY_RECORD_MISSING", "pending action has no idempotency record", decision_id=decision_id)
+                return result
+            if request_row["status"] == "in_progress":
+                result = self._result("escalated", "DUPLICATE_RESUME_IN_PROGRESS", "another resume attempt owns this logical action", decision_id=decision_id)
+                return result
+            if request_row["status"] in {"completed", "failed", "rejected", "escalated"} and request_row.get("result") is not None:
+                result = request_row["result"]
+                return result
+            if request_row["status"] != "approval_pending":
+                result = self._result("escalated", "IDEMPOTENCY_RECORD_INCOMPLETE", "approval record is not resumable", decision_id=decision_id)
+                return result
             approval = self.registry.get_approval(approval_id)
             decision = frozen["decision"]
             if not (
@@ -446,12 +464,27 @@ class RuntimeEngine:
             if not self.registry.claim_state(frozen["agent_id"], frozen["request_id"], state_version, token, lease_seconds=self.claim_lease_seconds):
                 return self._result("escalated", "STATE_VERSION_CONFLICT", "state is currently claimed")
             claim_active = True
-            request_row = self.registry.lookup_request_result(frozen["agent_id"], frozen["version"], frozen["spec_hash"], frozen["request_id"])
-            if not request_row:
-                return self._result("rejected", "IDEMPOTENCY_RECORD_MISSING", "pending action has no idempotency record")
+            if not self.registry.claim_approval_resume(idempotency_key):
+                latest = self.registry.lookup_request_result(
+                    frozen["agent_id"], frozen["version"], frozen["spec_hash"], frozen["request_id"]
+                )
+                if latest and latest.get("result") is not None and latest["status"] in {"completed", "failed", "rejected", "escalated"}:
+                    result = latest["result"]
+                else:
+                    result = self._result(
+                        "escalated", "DUPLICATE_RESUME_IN_PROGRESS",
+                        "another resume attempt claimed or completed this logical action",
+                        decision_id=decision_id,
+                    )
+                return result
+            resume_claimed = True
             tool = self.gateway.catalog.get(decision["tool_name"])
             if not tool:
-                return self._result("rejected", "UNAUTHORIZED_TOOL_ATTEMPT", "approved tool is no longer in the catalogue")
+                result = self._result("rejected", "UNAUTHORIZED_TOOL_ATTEMPT", "approved tool is no longer in the catalogue")
+                self.registry.finish_idempotency(idempotency_key, "rejected", result)
+                self.registry.release_state_claim(frozen["agent_id"], frozen["request_id"], token)
+                claim_active = False
+                return result
             gateway_decision = GatewayDecision(
                 "mock_only" if decision["mode"] == "mock" else "allow", "APPROVAL_RESUMED",
                 "resuming frozen approved decision", decision["tool_name"], frozen["environment"],
@@ -491,10 +524,21 @@ class RuntimeEngine:
             self.registry.finish_idempotency(frozen["idempotency_key"], "completed", result)
             return result
         except (RegistryError, RegistryNotFound, ValueError) as exc:
-            result = self._result("rejected", "APPROVAL_RESUME_FAILED", str(exc), decision_id=decision_id)
+            status = "escalated" if resume_claimed else "rejected"
+            result = self._result(status, "APPROVAL_RESUME_FAILED", str(exc), decision_id=decision_id)
+            if resume_claimed and idempotency_key:
+                try:
+                    self.registry.finish_idempotency(idempotency_key, "escalated", result)
+                except Exception:
+                    pass
             return result
         except Exception as exc:
             result = self._result("failed", "RUNTIME_ERROR", type(exc).__name__, decision_id=decision_id)
+            if resume_claimed and idempotency_key:
+                try:
+                    self.registry.finish_idempotency(idempotency_key, "failed", result)
+                except Exception:
+                    pass
             return result
         finally:
             if claim_active and token and frozen:

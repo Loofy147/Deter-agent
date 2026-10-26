@@ -737,6 +737,24 @@ class Registry:
             )
             return True
 
+    def claim_approval_resume(self, key: str, *, now: float | None = None) -> bool:
+        """Atomically claim the one-time transition from approval_pending to in_progress."""
+        current = now if now is not None else time.time()
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT status FROM idempotency_records WHERE idempotency_key=?", (key,)
+            ).fetchone()
+            if not row:
+                raise RegistryNotFound("idempotency key was not claimed")
+            if row["status"] != "approval_pending":
+                return False
+            updated = conn.execute(
+                """UPDATE idempotency_records SET status='in_progress',updated_at=?
+                   WHERE idempotency_key=? AND status='approval_pending'""",
+                (current, key),
+            )
+            return updated.rowcount == 1
+
     def finish_idempotency(self, key: str, status: str, result: dict[str, Any], *, now: float | None = None) -> None:
         if status not in {"approval_pending","completed","failed","rejected","escalated"}:
             raise RegistryError("invalid final idempotency status")
