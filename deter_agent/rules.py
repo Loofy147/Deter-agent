@@ -55,7 +55,7 @@ class Domain:
         if unknown:
             raise RuleValidationError(f"unsupported operators: {sorted(unknown)}")
         exists = spec.get("exists")
-        if exists is not None and not isinstance(exists, bool):
+        if "exists" in spec and not isinstance(exists, bool):
             raise RuleValidationError("exists must be boolean")
         existence = "present" if exists is True else "absent" if exists is False else "any"
         values: frozenset[str] | None = None
