@@ -27,7 +27,7 @@ def register_version(registry, version, rollback=None, created_by="builder"):
                 for kind in REQUIRED_TEST_TYPES
             ],
             "required_test_types":list(REQUIRED_TEST_TYPES),
-            "thresholds":{"minimum_performance_score":0.0},
+            "thresholds":{"minimum_performance_score":0.0,"maximum_latency_ms":10000.0},
         },
         created_by="independent-qa",
     )
@@ -38,7 +38,7 @@ def register_version(registry, version, rollback=None, created_by="builder"):
         component_scores={**{name:1.0 for name in HARD_COMPONENTS},"performance_score":1.0}, score=0.99,
         results=[
             {"test_id":f"T-{kind.upper()}","test_type":kind,"component":TEST_COMPONENT.get(kind,kind),
-             "passed":True,"required":True}
+             "passed":True,"required":True,"elapsed_ms":1.0}
             for kind in REQUIRED_TEST_TYPES
         ], created_by="independent-qa",
         started_at=100.0, completed_at=101.0,
@@ -104,7 +104,7 @@ class EvaluationTests(unittest.TestCase):
         suite = {
             "required_test_types": list(REQUIRED_TEST_TYPES),
             "performance_score": 1.0,
-            "thresholds": {"minimum_performance_score": 0.95},
+            "thresholds": {"minimum_performance_score": 0.95, "maximum_latency_ms": 1000.0},
             "tests": [
                 {"test_id": kind, "test_type":kind, "repeat_count":3 if kind=="determinism" else 1,
                  "expected_output":{"status":"ok"}}
@@ -120,6 +120,29 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(report["status"], "passed")
         self.assertTrue(report["floors_met"])
         self.assertTrue(report["coverage_complete"])
+
+    def test_performance_score_cannot_be_self_reported_by_suite(self):
+        suite = {
+            "required_test_types": list(REQUIRED_TEST_TYPES),
+            "performance_score": 1.0,
+            "thresholds": {"minimum_performance_score": 0.95, "maximum_latency_ms": 1.0},
+            "tests": [
+                {"test_id": kind, "test_type":kind, "repeat_count":3 if kind=="determinism" else 1,
+                 "expected_output":{"status":"slow"}}
+                for kind in REQUIRED_TEST_TYPES
+            ],
+        }
+        self.registry.record_evaluation_suite("suite-slow", "agent-a", "v1.0.0", suite, created_by="qa-user")
+        def slow_execute(case):
+            time.sleep(0.01)
+            return {"status":"slow"}
+        report = EvaluationHarness(self.registry).evaluate(
+            suite_id="suite-slow", agent_id="agent-a", version="v1.0.0", policy_version="v1",
+            execute=slow_execute, created_by="qa-user",
+        )
+        self.assertEqual(report["status"], "failed")
+        self.assertFalse(report["floors_met"])
+        self.assertLess(report["component_scores"]["performance_score"], 0.95)
 
     def test_missing_component_tests_fail_coverage(self):
         suite = {"tests":[{"test_id":"R","test_type":"regression"}], "thresholds":{}}

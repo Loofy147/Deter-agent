@@ -73,7 +73,7 @@ class RegistryTests(unittest.TestCase):
             {"tests": [
                 {"test_id":f"T-{kind.upper()}","test_type":kind,"repeat_count":3 if kind=="determinism" else 1}
                 for kind in REQUIRED_TEST_TYPES
-            ], "required_test_types":list(REQUIRED_TEST_TYPES)},
+            ], "required_test_types":list(REQUIRED_TEST_TYPES), "thresholds":{"maximum_latency_ms":10000.0}},
             created_by="independent-qa",
         )
         self.registry.record_evaluation(
@@ -85,7 +85,7 @@ class RegistryTests(unittest.TestCase):
             score=1.0,
             results=[
                 {"test_id":f"T-{kind.upper()}","test_type":kind,"component":TEST_COMPONENT.get(kind,kind),
-                 "passed":True,"required":True}
+                 "passed":True,"required":True,"elapsed_ms":1.0}
                 for kind in REQUIRED_TEST_TYPES
             ], created_by="independent-qa",
             started_at=100.0, completed_at=101.0,
