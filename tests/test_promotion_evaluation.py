@@ -71,7 +71,7 @@ class CanaryAssignmentTests(unittest.TestCase):
         bucket = canary_bucket("canary-request")
         self.assertFalse(is_canary_request("canary-request", 0))
         self.assertTrue(is_canary_request("canary-request", 100))
-        self.assertEqual(is_canary_request("canary-request", bucket), bucket > 0)
+        self.assertFalse(is_canary_request("canary-request", bucket))
         self.assertEqual(is_canary_request("canary-request", bucket + 1), True)
 
     def test_invalid_canary_inputs_are_rejected(self):
