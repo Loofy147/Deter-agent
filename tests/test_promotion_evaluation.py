@@ -3,7 +3,7 @@ import time
 import unittest
 
 from deter_agent.evaluation import EvaluationHarness
-from deter_agent.promotion import PromotionDenied, PromotionGate, policy_diff
+from deter_agent.promotion import PromotionDenied, PromotionGate, canary_bucket, is_canary_request, policy_diff
 from deter_agent.canonical import sha256_json
 from deter_agent.evaluation_contract import HARD_COMPONENTS, REQUIRED_TEST_TYPES, TEST_COMPONENT
 from deter_agent.registry import Registry, RegistryConflict
@@ -56,6 +56,33 @@ def approve(registry, version_row, eval_run_id, environment, policy, *, target_t
         spec_hash=version_row["spec_hash"], eval_run_id=eval_run_id, expires_at=time.time()+600,
         policy_diff_hash=diff_hash, scope=scope or ["permission_change"],
     )
+
+
+class CanaryAssignmentTests(unittest.TestCase):
+    def test_bucket_matches_normative_sha256_utf8_modulo_formula(self):
+        import hashlib
+        for request_id in ("request-1", "alpha", "é", "e\u0301", "请求-42"):
+            with self.subTest(request_id=request_id):
+                expected = int(hashlib.sha256(request_id.encode("utf-8")).hexdigest(), 16) % 100
+                self.assertEqual(canary_bucket(request_id), expected)
+                self.assertEqual(canary_bucket(request_id), canary_bucket(request_id))
+
+    def test_percent_boundaries_and_deterministic_membership(self):
+        bucket = canary_bucket("canary-request")
+        self.assertFalse(is_canary_request("canary-request", 0))
+        self.assertTrue(is_canary_request("canary-request", 100))
+        self.assertEqual(is_canary_request("canary-request", bucket), bucket > 0)
+        self.assertEqual(is_canary_request("canary-request", bucket + 1), True)
+
+    def test_invalid_canary_inputs_are_rejected(self):
+        for request_id in ("", None, 7):
+            with self.subTest(request_id=request_id):
+                with self.assertRaises(ValueError):
+                    canary_bucket(request_id)
+        for percentage in (-1, 101, True, 10.0, "10"):
+            with self.subTest(percentage=percentage):
+                with self.assertRaises(ValueError):
+                    is_canary_request("request", percentage)
 
 
 class PolicyDiffAdversarialTests(unittest.TestCase):

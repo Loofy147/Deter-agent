@@ -1,6 +1,7 @@
 """Promotion gate binding immutable spec/evaluation/approval/policy evidence."""
 from __future__ import annotations
 
+import hashlib
 import time
 import uuid
 from typing import Any
@@ -105,6 +106,21 @@ def policy_diff(previous: dict[str, Any] | None, candidate: dict[str, Any]) -> d
 
 def policy_expands(previous: dict[str, Any] | None, candidate: dict[str, Any]) -> bool:
     return bool(policy_diff(previous, candidate)["expansions"])
+
+
+def canary_bucket(request_id: str) -> int:
+    """Assign a logical request to a stable 0-99 cohort using the normative contract formula."""
+    if not isinstance(request_id, str) or not request_id:
+        raise ValueError("request_id must be a non-empty string")
+    digest = hashlib.sha256(request_id.encode("utf-8", "strict")).hexdigest()
+    return int(digest, 16) % 100
+
+
+def is_canary_request(request_id: str, percentage: int) -> bool:
+    """Return whether a request is in a deterministic canary cohort of size percentage."""
+    if isinstance(percentage, bool) or not isinstance(percentage, int) or not 0 <= percentage <= 100:
+        raise ValueError("percentage must be an integer between 0 and 100")
+    return canary_bucket(request_id) < percentage
 
 
 class PromotionGate:
