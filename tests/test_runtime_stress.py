@@ -117,6 +117,7 @@ class RuntimeStressTests(unittest.TestCase):
         replacement = make_policy(
             "production", tools=["create_ticket"], approvals=[], policy_id="replacement-policy"
         )
+        replacement["version"] = "v2"
         self.registry.register_policy("replacement-policy", "v2", "production", replacement)
         with self.assertRaises(RegistryConflict):
             self.registry.bind_policy(
